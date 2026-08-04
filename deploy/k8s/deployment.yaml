@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quellbrook-gateway
+  namespace: quellbrook-edge
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quellbrook-gateway
+  namespace: quellbrook-edge
+  labels:
+    app.kubernetes.io/name: quellbrook-gateway
+    app.kubernetes.io/part-of: quellbrook
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quellbrook-gateway
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: enabled
+      labels:
+        app.kubernetes.io/name: quellbrook-gateway
+        app.kubernetes.io/part-of: quellbrook
+    spec:
+      serviceAccountName: quellbrook-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: ghcr.io/code-assurance-initiative/quellbrook-gateway@sha256:2ca7d6cce84de8f45bae87cce2a68b8e42ea84dddf24d3e65b18f313d2dd29ae
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OIDC_ISSUER
+              value: https://id.quellbrook.example/realms/operations
+            - name: OIDC_JWKS_URL
+              value: https://id.quellbrook.example/realms/operations/protocol/openid-connect/certs
+            - name: TOKEN_URL
+              value: https://id.quellbrook.example/realms/operations/protocol/openid-connect/token
+            - name: ORDERS_API_URL
+              value: http://quellbrook-orders.quellbrook-orders.svc.cluster.local
+            - name: DISPATCH_API_URL
+              value: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local
+            - name: CORS_ORIGINS
+              value: https://ops.quellbrook.example
+            - name: GATEWAY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: quellbrook-gateway-client
+                  key: client-secret
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: '1'
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ['ALL']
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: quellbrook-gateway
+  namespace: quellbrook-edge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quellbrook-gateway

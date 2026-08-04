@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: quellbrook-gateway
+  namespace: quellbrook-edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: quellbrook-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
