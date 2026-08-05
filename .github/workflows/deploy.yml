@@ -1,0 +1,56 @@
+name: Deploy
+
+# Manual, behind the protected "production" environment (required reviewers): roll the release's image out by digest,
+# wait for the rollout, and undo it if the new pods never become ready.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to roll out, e.g. v0.3.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      VERSION: ${{ inputs.version }}
+      NAMESPACE: quellbrook-edge
+    steps:
+      - name: Fetch the image digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern image-digests.txt --dir release
+
+      - name: Write kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.PRODUCTION_KUBECONFIG }}
+        run: |
+          umask 077
+          printf '%s' "$KUBECONFIG_DATA" > "$RUNNER_TEMP/kubeconfig"
+
+      - name: Roll out
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+        run: |
+          digest=$(sed -n 's/^gateway=//p' release/image-digests.txt)
+          kubectl -n "$NAMESPACE" set image deployment/quellbrook-gateway gateway="ghcr.io/code-assurance-initiative/quellbrook-gateway@${digest}"
+          if ! kubectl -n "$NAMESPACE" rollout status deployment/quellbrook-gateway --timeout=5m; then
+            echo "::error::quellbrook-gateway did not become ready; rolling back"
+            kubectl -n "$NAMESPACE" rollout undo deployment/quellbrook-gateway
+            kubectl -n "$NAMESPACE" rollout status deployment/quellbrook-gateway --timeout=5m
+            exit 1
+          fi
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kubeconfig"
