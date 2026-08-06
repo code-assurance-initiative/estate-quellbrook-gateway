@@ -1,0 +1,30 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: quellbrook-gateway
+  description: API gateway and backend-for-frontend of the operator console.
+  annotations:
+    github.com/project-slug: code-assurance-initiative/estate-quellbrook-gateway
+  tags: [typescript, nodejs, fastify]
+spec:
+  type: service
+  lifecycle: production
+  owner: group:edge
+  system: quellbrook-operations
+  providesApis:
+    - quellbrook-console-api
+  consumesApis:
+    - quellbrook-orders-api
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: quellbrook-console-api
+  description: The /api routes the operator console calls.
+spec:
+  type: openapi
+  lifecycle: production
+  owner: group:edge
+  system: quellbrook-operations
+  definition: |
+    See README.md (Routes); the gateway relays the upstream contracts pinned in contracts/upstream/.
