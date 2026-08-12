@@ -90,6 +90,31 @@ export function ordersRoutes(app: FastifyInstance, dependencies: OrdersRouteDepe
     async (request, reply) =>
       relay(reply, await dependencies.orders.place(operatorOf(request), request.body)),
   );
+
+  app.post<{ Params: { orderId: string }; Body: { reason: string } }>(
+    '/api/orders/:orderId/cancellation',
+    {
+      preHandler: [signedIn, requireScope('orders:write')],
+      schema: {
+        params: { type: 'object', required: ['orderId'], properties: { orderId: uuid } },
+        body: {
+          type: 'object',
+          required: ['reason'],
+          additionalProperties: false,
+          properties: { reason: { type: 'string', minLength: 1, maxLength: 200 } },
+        },
+      },
+    },
+    async (request, reply) =>
+      relay(
+        reply,
+        await dependencies.orders.cancel(
+          operatorOf(request),
+          request.params.orderId,
+          request.body.reason,
+        ),
+      ),
+  );
 }
 
 export function operatorOf(request: { operator?: { id: string } }): string {

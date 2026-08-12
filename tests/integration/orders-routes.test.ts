@@ -80,6 +80,22 @@ describe('order routes', () => {
     expect(response.headers['content-type']).toContain('application/problem+json');
   });
 
+  it('cancels an order with a reason', async () => {
+    test.orders.answer(new Response(null, { status: 204 }));
+
+    const response = await test.app.inject({
+      method: 'POST',
+      url: '/api/orders/0198f1a2-0000-7000-8000-000000000001/cancellation',
+      payload: { reason: 'Shipper withdrew the order' },
+      headers: await test.bearer(['orders:write']),
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(test.orders.calls.at(-1)?.url).toBe(
+      'http://orders.test/orders/0198f1a2-0000-7000-8000-000000000001/cancellation',
+    );
+  });
+
   it('refuses a malformed order before calling the order service', async () => {
     const calls = test.orders.calls.length;
 

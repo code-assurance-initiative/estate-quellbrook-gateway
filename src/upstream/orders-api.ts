@@ -10,6 +10,7 @@ export interface OrdersApi {
   list(operatorId: string, query: OrderListQuery): Promise<UpstreamResponse>;
   get(operatorId: string, orderId: string): Promise<UpstreamResponse>;
   place(operatorId: string, order: unknown): Promise<UpstreamResponse>;
+  cancel(operatorId: string, orderId: string, reason: string): Promise<UpstreamResponse>;
 }
 
 export function createOrdersApi(client: UpstreamClient): OrdersApi {
@@ -30,6 +31,14 @@ export function createOrdersApi(client: UpstreamClient): OrdersApi {
     },
     place(operatorId, order) {
       return client.send({ method: 'POST', path: '/orders', operatorId, body: order });
+    },
+    cancel(operatorId, orderId, reason) {
+      return client.send({
+        method: 'POST',
+        path: `/orders/${encodeURIComponent(orderId)}/cancellation`,
+        operatorId,
+        body: { reason },
+      });
     },
   };
 }
