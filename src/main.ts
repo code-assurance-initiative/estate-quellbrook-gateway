@@ -3,6 +3,7 @@ import { buildApp } from './app.js';
 import { createOperatorVerifier, remoteKeys } from './auth/operator-auth.js';
 import { loadConfig } from './config.js';
 import { loggerOptions } from './logger.js';
+import { createDispatchApi } from './upstream/dispatch-api.js';
 import { createOrdersApi } from './upstream/orders-api.js';
 import { createServiceTokenSource } from './upstream/service-token.js';
 import { createUpstreamClient } from './upstream/upstream-client.js';
@@ -27,6 +28,7 @@ const app = await buildApp({
     remoteKeys(config.operatorTokens.jwksUrl),
   ),
   orders: createOrdersApi(upstream('orders', config.upstreams.orders)),
+  dispatch: createDispatchApi(upstream('dispatch', config.upstreams.dispatch)),
   corsOrigins: config.corsOrigins,
 });
 

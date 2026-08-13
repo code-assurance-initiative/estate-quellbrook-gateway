@@ -3,8 +3,10 @@ import helmet from '@fastify/helmet';
 import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
 import type { OperatorVerifier } from './auth/operator-auth.js';
 import { sendProblem } from './http/problem.js';
+import { dispatchRoutes } from './routes/dispatch-routes.js';
 import { healthRoutes } from './routes/health-routes.js';
 import { ordersRoutes } from './routes/orders-routes.js';
+import type { DispatchApi } from './upstream/dispatch-api.js';
 import type { OrdersApi } from './upstream/orders-api.js';
 import { UpstreamError } from './upstream/upstream-client.js';
 
@@ -12,6 +14,7 @@ export interface AppDependencies {
   readonly logger: FastifyBaseLogger;
   readonly verifier: OperatorVerifier;
   readonly orders: OrdersApi;
+  readonly dispatch: DispatchApi;
   readonly corsOrigins: readonly string[];
 }
 
@@ -46,5 +49,6 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
 
   healthRoutes(app);
   ordersRoutes(app, dependencies);
+  dispatchRoutes(app, dependencies);
   return app;
 }
