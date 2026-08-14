@@ -69,4 +69,28 @@ export function dispatchRoutes(
         await dependencies.dispatch.startRoute(operatorOf(request), request.params.routeId),
       ),
   );
+
+  app.get<{ Querystring: { date: string; depot: string } }>(
+    '/api/dispatch/drivers/available',
+    {
+      schema: {
+        querystring: {
+          type: 'object',
+          required: ['date', 'depot'],
+          properties: { date, depot: { type: 'string', pattern: '^[A-Z]{3}$' } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const operatorId = request.operator?.id ?? 'anonymous';
+      return relay(
+        reply,
+        await dependencies.dispatch.availableDrivers(
+          operatorId,
+          request.query.date,
+          request.query.depot,
+        ),
+      );
+    },
+  );
 }

@@ -49,6 +49,21 @@ describe('dispatch routes', () => {
     expect(test.dispatch.calls.at(-1)?.headers['x-quellbrook-operator']).toBe('dispatcher-2');
   });
 
+  it('lists the drivers available for the route planner', async () => {
+    test.dispatch.answer(json(200, { drivers: [], vehicles: [] }));
+
+    const response = await test.app.inject({
+      method: 'GET',
+      url: '/api/dispatch/drivers/available?date=2026-08-12&depot=AAR',
+      headers: await test.bearer(['dispatch:read']),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(test.dispatch.calls.at(-1)?.url).toBe(
+      'http://dispatch.test/drivers/available?date=2026-08-12&depot=AAR',
+    );
+  });
+
   it('refuses writes without the write scope and malformed dates', async () => {
     const reader = await test.bearer(['dispatch:read']);
 
