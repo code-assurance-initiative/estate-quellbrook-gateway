@@ -6,6 +6,7 @@ import { sendProblem } from './http/problem.js';
 import { dispatchRoutes } from './routes/dispatch-routes.js';
 import { healthRoutes } from './routes/health-routes.js';
 import { ordersRoutes } from './routes/orders-routes.js';
+import { shipmentRoutes } from './routes/shipment-routes.js';
 import type { DispatchApi } from './upstream/dispatch-api.js';
 import type { OrdersApi } from './upstream/orders-api.js';
 import { UpstreamError } from './upstream/upstream-client.js';
@@ -50,5 +51,6 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   healthRoutes(app);
   ordersRoutes(app, dependencies);
   dispatchRoutes(app, dependencies);
+  shipmentRoutes(app, dependencies);
   return app;
 }

@@ -82,3 +82,66 @@ describe('dispatch routes', () => {
     expect(board.statusCode).toBe(400);
   });
 });
+
+describe('shipment view', () => {
+  let test: TestApp;
+  const orderId = '0198f1a2-0000-7000-8000-000000000001';
+  beforeAll(async () => {
+    test = await createTestApp();
+  });
+  afterAll(async () => {
+    await test.app.close();
+  });
+
+  it('joins the order with its delivery', async () => {
+    test.orders.answer(json(200, { id: orderId, status: 'placed' }));
+    test.dispatch.answer(json(200, { orderId, status: 'OutForDelivery' }));
+
+    const response = await test.app.inject({
+      method: 'GET',
+      url: `/api/shipments/${orderId}`,
+      headers: await test.bearer(['orders:read', 'dispatch:read']),
+    });
+
+    expect(response.json()).toEqual({
+      order: { id: orderId, status: 'placed' },
+      delivery: { orderId, status: 'OutForDelivery' },
+    });
+  });
+
+  it('shows no delivery while dispatch has not received the order', async () => {
+    test.orders.answer(json(200, { id: orderId }));
+    test.dispatch.answer(json(404, {}));
+
+    const response = await test.app.inject({
+      method: 'GET',
+      url: `/api/shipments/${orderId}`,
+      headers: await test.bearer(['orders:read', 'dispatch:read']),
+    });
+
+    expect(response.json<{ delivery: unknown }>().delivery).toBeNull();
+  });
+
+  it('is not found when the order is not', async () => {
+    test.orders.answer(json(404, { status: 404 }));
+    test.dispatch.answer(json(404, {}));
+
+    const response = await test.app.inject({
+      method: 'GET',
+      url: `/api/shipments/${orderId}`,
+      headers: await test.bearer(['orders:read', 'dispatch:read']),
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('needs both read scopes', async () => {
+    const response = await test.app.inject({
+      method: 'GET',
+      url: `/api/shipments/${orderId}`,
+      headers: await test.bearer(['orders:read']),
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+});
