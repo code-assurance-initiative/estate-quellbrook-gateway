@@ -9,12 +9,18 @@ identity (OAuth 2.0 client credentials), forwarding the operator's id so the ser
 
 ## Routes
 
-| Method and path                   | Operator scope | Upstream                  |
-| --------------------------------- | -------------- | ------------------------- |
-| `GET /api/orders?page=&pageSize=` | `orders:read`  | orders `GET /orders`      |
-| `GET /api/orders/{orderId}`       | `orders:read`  | orders `GET /orders/{id}` |
-| `POST /api/orders`                | `orders:write` | orders `POST /orders`     |
-| `GET /healthz`, `GET /readyz`     | none           | — (probes)                |
+| Method and path                                    | Operator scope                  | Upstream                                                                         |
+| -------------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
+| `GET /api/orders?page=&pageSize=`                  | `orders:read`                   | orders `GET /orders`                                                             |
+| `GET /api/orders/{orderId}`                        | `orders:read`                   | orders `GET /orders/{id}`                                                        |
+| `POST /api/orders`                                 | `orders:write`                  | orders `POST /orders`                                                            |
+| `POST /api/orders/{orderId}/cancellation`          | `orders:write`                  | orders `POST /orders/{id}/cancellation`                                          |
+| `GET /api/dispatch/board?date=`                    | `dispatch:read`                 | dispatch `GET /routes?date=`                                                     |
+| `POST /api/dispatch/consignments/{id}/assignment`  | `dispatch:write`                | dispatch `POST /consignments/{id}/assignment`                                    |
+| `POST /api/dispatch/routes/{id}/start`             | `dispatch:write`                | dispatch `POST /routes/{id}/start`                                               |
+| `GET /api/dispatch/drivers/available?date=&depot=` | —                               | dispatch `GET /drivers/available`                                                |
+| `GET /api/shipments/{orderId}`                     | `orders:read` + `dispatch:read` | orders `GET /orders/{id}` and dispatch `GET /consignments/by-order/{id}`, joined |
+| `GET /healthz`, `GET /readyz`                      | none                            | — (probes)                                                                       |
 
 Requests are validated against JSON schemas before any upstream is called. Upstream answers below 500 are relayed as
 they are; timeouts become 504 and unavailable or failing upstreams 502, as problem details.
