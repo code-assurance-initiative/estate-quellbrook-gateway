@@ -1,6 +1,6 @@
 {
   "name": "quellbrook-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "API gateway and backend-for-frontend of the Quellbrook operations platform.",
   "private": true,
   "license": "MIT",
