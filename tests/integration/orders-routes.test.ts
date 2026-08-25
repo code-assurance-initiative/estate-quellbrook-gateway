@@ -141,7 +141,8 @@ describe('order routes', () => {
   });
 
   it('turns an unavailable order service into 502 and a slow one into 504', async () => {
-    test.orders.answer(json(503, {}), new DOMException('timed out', 'TimeoutError'));
+    const timeout = new DOMException('timed out', 'TimeoutError');
+    test.orders.answer(json(503, {}), json(503, {}), json(503, {}), timeout, timeout, timeout);
 
     const failed = await test.app.inject({
       method: 'GET',
