@@ -18,6 +18,8 @@ function titleFor(status: number): string {
       return 'Forbidden';
     case 404:
       return 'Not Found';
+    case 429:
+      return 'Too Many Requests';
     case 502:
       return 'Bad Gateway';
     case 504:

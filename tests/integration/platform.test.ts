@@ -35,6 +35,19 @@ describe('platform', () => {
     expect(response.headers['access-control-allow-credentials']).toBe('true');
   });
 
+  it('limits the requests of one client address, but not the probes', async () => {
+    const limited = await createTestApp({ rateLimitPerMinute: 2 });
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      statuses.push((await limited.app.inject({ method: 'GET', url: '/api/orders' })).statusCode);
+    }
+    const probe = await limited.app.inject({ method: 'GET', url: '/healthz' });
+    await limited.app.close();
+
+    expect(statuses).toEqual([401, 401, 429]);
+    expect(probe.statusCode).toBe(200);
+  });
+
   it('answers an unexpected failure with a generic problem', async () => {
     const fresh = await createTestApp();
     fresh.app.get('/boom', () => {

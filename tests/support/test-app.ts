@@ -16,7 +16,9 @@ export interface TestApp {
   bearer(scopes: readonly string[], subject?: string): Promise<{ authorization: string }>;
 }
 
-export async function createTestApp(): Promise<TestApp> {
+export async function createTestApp(
+  options: { rateLimitPerMinute?: number } = {},
+): Promise<TestApp> {
   const tokens = await createOperatorTokens();
   const orders = new FakeUpstream();
   const dispatch = new FakeUpstream();
@@ -36,6 +38,7 @@ export async function createTestApp(): Promise<TestApp> {
     orders: createOrdersApi(client('orders', 'http://orders.test', orders)),
     dispatch: createDispatchApi(client('dispatch', 'http://dispatch.test', dispatch)),
     corsOrigins: ['https://ops.test'],
+    ...options,
   });
   return {
     app,

@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
 import type { OperatorVerifier } from './auth/operator-auth.js';
 import { sendProblem } from './http/problem.js';
@@ -17,6 +18,8 @@ export interface AppDependencies {
   readonly orders: OrdersApi;
   readonly dispatch: DispatchApi;
   readonly corsOrigins: readonly string[];
+  /** Requests per minute and client address; the probes are exempt. */
+  readonly rateLimitPerMinute?: number;
 }
 
 /** Builds the gateway: security headers, CORS for the console, operator routes and health probes. */
@@ -32,6 +35,11 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     hsts: { maxAge: 31_536_000, includeSubDomains: true },
   });
   await app.register(cors, { origin: [...dependencies.corsOrigins], credentials: true });
+  await app.register(rateLimit, {
+    max: dependencies.rateLimitPerMinute ?? 300,
+    timeWindow: '1 minute',
+    allowList: (request) => request.url === '/healthz' || request.url === '/readyz',
+  });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof UpstreamError) {
@@ -43,6 +51,9 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     }
     if (error.validation) {
       return sendProblem(reply, 400, error.message);
+    }
+    if (error.statusCode !== undefined && error.statusCode < 500) {
+      return sendProblem(reply, error.statusCode, error.message);
     }
     request.log.error({ err: error }, 'unhandled error');
     return sendProblem(reply, 500, 'Something went wrong on our side.');
