@@ -105,3 +105,37 @@ describe('retries', () => {
     expect(failing.calls).toHaveLength(1);
   });
 });
+
+describe('failure logging', () => {
+  it('logs the failed request with its upstream, status and attempt', async () => {
+    const lines: string[] = [];
+    const logger = pino({ level: 'warn' }, { write: (line: string) => lines.push(line) });
+    const upstream = new FakeUpstream().always(new Response(null, { status: 503 }));
+    const client = createUpstreamClient({
+      name: 'orders',
+      baseUrl: 'http://orders.test',
+      timeoutMs: 1_000,
+      tokens: fixedToken,
+      fetch: upstream.fetch,
+      logger,
+      retries: 0,
+    });
+
+    await expect(
+      client.send({ method: 'GET', path: '/orders', operatorId: 'operator-4' }),
+    ).rejects.toBeInstanceOf(UpstreamError);
+
+    const logged = JSON.parse(lines[0] ?? '{}') as {
+      upstream?: string;
+      status?: number;
+      attempt?: number;
+      request?: { url?: string };
+    };
+    expect(logged).toMatchObject({
+      upstream: 'orders',
+      status: 503,
+      attempt: 1,
+      request: { url: 'http://orders.test/orders' },
+    });
+  });
+});

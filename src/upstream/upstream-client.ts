@@ -88,8 +88,7 @@ export function createUpstreamClient(options: UpstreamClientOptions): UpstreamCl
       options.logger.warn(
         {
           upstream: options.name,
-          method: request.method,
-          path: url.pathname,
+          request: { method: request.method, url: url.href, headers },
           status: response.status,
           attempt: number,
         },
@@ -102,8 +101,7 @@ export function createUpstreamClient(options: UpstreamClientOptions): UpstreamCl
       options.logger.warn(
         {
           upstream: options.name,
-          method: request.method,
-          path: url.pathname,
+          request: { method: request.method, url: url.href, headers },
           failure,
           attempt: number,
         },
