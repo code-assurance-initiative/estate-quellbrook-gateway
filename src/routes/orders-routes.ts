@@ -88,7 +88,14 @@ export function ordersRoutes(app: FastifyInstance, dependencies: OrdersRouteDepe
     '/api/orders',
     { preHandler: [signedIn, requireScope('orders:write')], schema: { body: orderBody } },
     async (request, reply) =>
-      relay(reply, await dependencies.orders.place(operatorOf(request), request.body)),
+      relay(
+        reply,
+        await dependencies.orders.place(
+          operatorOf(request),
+          request.body,
+          idempotencyKeyOf(request.headers),
+        ),
+      ),
   );
 
   app.post<{ Params: { orderId: string }; Body: { reason: string } }>(
@@ -115,6 +122,14 @@ export function ordersRoutes(app: FastifyInstance, dependencies: OrdersRouteDepe
         ),
       ),
   );
+}
+
+/** The console sends one Idempotency-Key per submitted form; anything else is not forwarded. */
+function idempotencyKeyOf(
+  headers: Record<string, string | string[] | undefined>,
+): string | undefined {
+  const value = headers['idempotency-key'];
+  return typeof value === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(value) ? value : undefined;
 }
 
 export function operatorOf(request: { operator?: { id: string } }): string {

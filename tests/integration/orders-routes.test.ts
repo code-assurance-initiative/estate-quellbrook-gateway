@@ -61,6 +61,29 @@ describe('order routes', () => {
     expect(test.orders.calls.at(-1)?.body).toEqual(order);
   });
 
+  it('forwards the idempotency key of a submission, and only a well-formed one', async () => {
+    test.orders.answer(json(201, {}), json(201, {}));
+    const headers = await test.bearer(['orders:write']);
+
+    await test.app.inject({
+      method: 'POST',
+      url: '/api/orders',
+      payload: order,
+      headers: { ...headers, 'idempotency-key': 'form-7f3a2c19' },
+    });
+    const forwarded = test.orders.calls.at(-1)?.headers['idempotency-key'];
+    await test.app.inject({
+      method: 'POST',
+      url: '/api/orders',
+      payload: order,
+      headers: { ...headers, 'idempotency-key': 'x' },
+    });
+    const dropped = test.orders.calls.at(-1)?.headers['idempotency-key'];
+
+    expect(forwarded).toBe('form-7f3a2c19');
+    expect(dropped).toBeUndefined();
+  });
+
   it('relays the order service answer for one order, including its 404', async () => {
     test.orders.answer(
       json(
