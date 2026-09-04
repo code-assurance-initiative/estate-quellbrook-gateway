@@ -31,6 +31,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern image-digests.txt --dir release
 
+      - name: Verify the image's signed provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest=$(sed -n 's/^gateway=//p' release/image-digests.txt)
+          gh attestation verify "oci://ghcr.io/code-assurance-initiative/quellbrook-gateway@${digest}" --repo "$GITHUB_REPOSITORY"
+
       - name: Write kubeconfig
         env:
           KUBECONFIG_DATA: ${{ secrets.PRODUCTION_KUBECONFIG }}

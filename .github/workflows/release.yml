@@ -1,7 +1,8 @@
 name: Release
 
-# Publishing a GitHub release for a version tag builds the image (pushed by digest, with provenance and an SBOM) and
-# attaches its digest to the release. Deploying is a separate, manual step (deploy.yml).
+# Publishing a GitHub release for a version tag builds the image (pushed by digest, with an SBOM), signs a
+# build-provenance attestation for it (Sigstore, pushed to the registry) and attaches its digest to the release.
+# Deploying is a separate, manual step (deploy.yml).
 on:
   release:
     types: [published]
@@ -42,6 +43,13 @@ jobs:
           provenance: mode=max
           sbom: true
           tags: ghcr.io/code-assurance-initiative/quellbrook-gateway:${{ github.event.release.tag_name }}
+
+      - name: Attest and sign the image's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/code-assurance-initiative/quellbrook-gateway
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
 
       - name: Attach the image digest to the release
         env:
