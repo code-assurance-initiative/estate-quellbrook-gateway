@@ -1,0 +1,72 @@
+From 23a621a71e07546ca7129dd7f864cfae3b15d698 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Tue, 28 Jul 2026 13:17:25 +0200
+Subject: docs: ADR 0001 and ADR 0002 (a BFF that calls the services with its
+ own identity)
+
+---
+ .../adr/0001-record-architecture-decisions.md | 20 ++++++++++++++
+ docs/adr/0002-bff-with-service-identity.md    | 27 +++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+ create mode 100644 docs/adr/0001-record-architecture-decisions.md
+ create mode 100644 docs/adr/0002-bff-with-service-identity.md
+
+diff --git a/docs/adr/0001-record-architecture-decisions.md b/docs/adr/0001-record-architecture-decisions.md
+new file mode 100644
+index 0000000..1618cea
+--- /dev/null
++++ b/docs/adr/0001-record-architecture-decisions.md
+@@ -0,0 +1,20 @@
++# 1. Record architecture decisions
++
++- Status: Accepted
++- Date: 2026-07-27
++- Deciders: Mara Ellingsworth, Teodor Vasko, Ines Halvard
++
++## Context
++
++The gateway is the single entry point of the operator console and sits between the identity provider and every
++backend service. Decisions about it affect all other teams.
++
++## Decision
++
++We record every decision that shapes the gateway's routes, security model or operation as an architecture decision
++record in `docs/adr`, numbered, with status, context, decision and consequences.
++
++## Consequences
++
++- Positive: other teams can see why the gateway behaves as it does; reviews can point at a record.
++- Negative: records take time and go stale unless superseded decisions are marked.
+diff --git a/docs/adr/0002-bff-with-service-identity.md b/docs/adr/0002-bff-with-service-identity.md
+new file mode 100644
+index 0000000..4b20fa2
+--- /dev/null
++++ b/docs/adr/0002-bff-with-service-identity.md
+@@ -0,0 +1,27 @@
++# 2. A backend-for-frontend that calls the services with its own identity
++
++- Status: Accepted
++- Date: 2026-07-28
++- Deciders: Mara Ellingsworth, Teodor Vasko, Ruth Calloway (Orders), Kasper Nyholt (Fleet)
++
++## Context
++
++The operator console needs data from several services, sometimes combined. Operators sign in at the identity provider
++through the ingress's authentication proxy. The backend services should not each have to understand operator roles,
++and the console should not call them directly.
++
++## Decision
++
++The gateway is the only backend the console calls. It verifies the operator's token itself (signature, issuer,
++audience, expiry) and authorises each route by the operator's scopes; every `/api` route registers the `authenticate`
++and `requireScope` pre-handlers. It calls the services with its own access token (client credentials), which holds
++the services' scopes, and forwards the operator's id in `X-Quellbrook-Operator`. Upstream clients live in
++`src/upstream/` and know nothing about HTTP routing (enforced by the lint configuration).
++
++## Consequences
++
++- Positive: one place decides what an operator may do; the services trust one client; aggregated views (shipment
++  status) are composed here without the console knowing the services.
++- Negative: the gateway is the authorisation boundary — a route registered without the pre-handlers exposes the
++  services' data with the gateway's own rights, so route reviews must check them; the gateway's client secret is a
++  high-value credential.

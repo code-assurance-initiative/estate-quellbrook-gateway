@@ -1,0 +1,60 @@
+From 31ed9572e58d21d87ac3c372f2ccf51da1ffe6f7 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Fri, 21 Aug 2026 15:44:09 +0200
+Subject: release 0.2.0
+
+---
+ CHANGELOG.md      | 7 +++++++
+ package-lock.json | 4 ++--
+ package.json      | 2 +-
+ 3 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5207007..c657d6c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,13 @@
+ All notable changes to this project are documented here. The format follows
+ [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
+ 
++## [0.2.0] - 2026-08-21
++
++### Added
++
++- Cancelling orders; the dispatch board (board, assignment, starting a route, available drivers and vehicles).
++- The shipment view: an order joined with its delivery.
++
+ ## [0.1.0] - 2026-08-07
+ 
+ ### Added
+diff --git a/package-lock.json b/package-lock.json
+index 1f344a1..3d6bb76 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "quellbrook-gateway",
+-  "version": "0.1.0",
++  "version": "0.2.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "quellbrook-gateway",
+-      "version": "0.1.0",
++      "version": "0.2.0",
+       "license": "MIT",
+       "dependencies": {
+         "@fastify/cors": "^11.3.0",
+diff --git a/package.json b/package.json
+index 54cc491..0782fae 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "quellbrook-gateway",
+-  "version": "0.1.0",
++  "version": "0.2.0",
+   "description": "API gateway and backend-for-frontend of the Quellbrook operations platform.",
+   "private": true,
+   "license": "MIT",

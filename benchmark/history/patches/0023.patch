@@ -1,0 +1,57 @@
+From f9afee4941a20baff8826e0ccea10d389c83a425 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Fri, 4 Sep 2026 10:12:40 +0200
+Subject: ci: sign the image's build provenance and verify it before deploying
+
+---
+ .github/workflows/deploy.yml  |  7 +++++++
+ .github/workflows/release.yml | 12 ++++++++++--
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+index 5852033..828b2c1 100644
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -31,6 +31,13 @@ jobs:
+           GH_TOKEN: ${{ github.token }}
+         run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern image-digests.txt --dir release
+ 
++      - name: Verify the image's signed provenance
++        env:
++          GH_TOKEN: ${{ github.token }}
++        run: |
++          digest=$(sed -n 's/^gateway=//p' release/image-digests.txt)
++          gh attestation verify "oci://ghcr.io/code-assurance-initiative/quellbrook-gateway@${digest}" --repo "$GITHUB_REPOSITORY"
++
+       - name: Write kubeconfig
+         env:
+           KUBECONFIG_DATA: ${{ secrets.PRODUCTION_KUBECONFIG }}
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index c6a7f75..e8914d5 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -1,7 +1,8 @@
+ name: Release
+ 
+-# Publishing a GitHub release for a version tag builds the image (pushed by digest, with provenance and an SBOM) and
+-# attaches its digest to the release. Deploying is a separate, manual step (deploy.yml).
++# Publishing a GitHub release for a version tag builds the image (pushed by digest, with an SBOM), signs a
++# build-provenance attestation for it (Sigstore, pushed to the registry) and attaches its digest to the release.
++# Deploying is a separate, manual step (deploy.yml).
+ on:
+   release:
+     types: [published]
+@@ -43,6 +44,13 @@ jobs:
+           sbom: true
+           tags: ghcr.io/code-assurance-initiative/quellbrook-gateway:${{ github.event.release.tag_name }}
+ 
++      - name: Attest and sign the image's build provenance
++        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
++        with:
++          subject-name: ghcr.io/code-assurance-initiative/quellbrook-gateway
++          subject-digest: ${{ steps.image.outputs.digest }}
++          push-to-registry: true
++
+       - name: Attach the image digest to the release
+         env:
+           GH_TOKEN: ${{ github.token }}

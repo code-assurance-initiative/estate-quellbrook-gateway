@@ -1,0 +1,77 @@
+From fb2fb7627cf4ae072efb3349fec0e62b8e390369 Mon Sep 17 00:00:00 2001
+From: Ines Halvard <ines.halvard@example.invalid>
+Date: Fri, 28 Aug 2026 10:37:48 +0200
+Subject: chore(upstream): log the failed request with its upstream failures
+
+Support asked for the full request when an upstream fails, to replay it against staging.
+---
+ src/upstream/upstream-client.ts    |  6 ++----
+ tests/unit/upstream-client.test.ts | 34 ++++++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/src/upstream/upstream-client.ts b/src/upstream/upstream-client.ts
+index 122f7ba..8ee77af 100644
+--- a/src/upstream/upstream-client.ts
++++ b/src/upstream/upstream-client.ts
+@@ -88,8 +88,7 @@ export function createUpstreamClient(options: UpstreamClientOptions): UpstreamCl
+       options.logger.warn(
+         {
+           upstream: options.name,
+-          method: request.method,
+-          path: url.pathname,
++          request: { method: request.method, url: url.href, headers },
+           status: response.status,
+           attempt: number,
+         },
+@@ -102,8 +101,7 @@ export function createUpstreamClient(options: UpstreamClientOptions): UpstreamCl
+       options.logger.warn(
+         {
+           upstream: options.name,
+-          method: request.method,
+-          path: url.pathname,
++          request: { method: request.method, url: url.href, headers },
+           failure,
+           attempt: number,
+         },
+diff --git a/tests/unit/upstream-client.test.ts b/tests/unit/upstream-client.test.ts
+index 5f55f1c..f5764f3 100644
+--- a/tests/unit/upstream-client.test.ts
++++ b/tests/unit/upstream-client.test.ts
+@@ -105,3 +105,37 @@ describe('retries', () => {
+     expect(failing.calls).toHaveLength(1);
+   });
+ });
++
++describe('failure logging', () => {
++  it('logs the failed request with its upstream, status and attempt', async () => {
++    const lines: string[] = [];
++    const logger = pino({ level: 'warn' }, { write: (line: string) => lines.push(line) });
++    const upstream = new FakeUpstream().always(new Response(null, { status: 503 }));
++    const client = createUpstreamClient({
++      name: 'orders',
++      baseUrl: 'http://orders.test',
++      timeoutMs: 1_000,
++      tokens: fixedToken,
++      fetch: upstream.fetch,
++      logger,
++      retries: 0,
++    });
++
++    await expect(
++      client.send({ method: 'GET', path: '/orders', operatorId: 'operator-4' }),
++    ).rejects.toBeInstanceOf(UpstreamError);
++
++    const logged = JSON.parse(lines[0] ?? '{}') as {
++      upstream?: string;
++      status?: number;
++      attempt?: number;
++      request?: { url?: string };
++    };
++    expect(logged).toMatchObject({
++      upstream: 'orders',
++      status: 503,
++      attempt: 1,
++      request: { url: 'http://orders.test/orders' },
++    });
++  });
++});

@@ -1,0 +1,28 @@
+From 5e1bd61b9449e5d2e7feac15be46bbed6b9907b0 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Fri, 7 Aug 2026 15:30:52 +0200
+Subject: release 0.1.0
+
+---
+ CHANGELOG.md | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+ create mode 100644 CHANGELOG.md
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..5207007
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,12 @@
++# Changelog
++
++All notable changes to this project are documented here. The format follows
++[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
++
++## [0.1.0] - 2026-08-07
++
++### Added
++
++- Operator authentication (identity-provider tokens) and scope checks; order routes to the order service with the
++  gateway's service identity; health probes; security headers and CORS for the console.
++- Container image, Kubernetes manifests with ingress and authentication proxy, CI, CodeQL, release and deploy workflows.

@@ -1,0 +1,24 @@
+From 3baa8631ed9dc0c554530e54c9c268aaf3af5eaf Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Thu, 3 Sep 2026 16:02:27 +0200
+Subject: docs: retries, rate limit and idempotency in the README
+
+---
+ README.md | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/README.md b/README.md
+index b1f55e0..e34eb1b 100644
+--- a/README.md
++++ b/README.md
+@@ -22,7 +22,9 @@ identity (OAuth 2.0 client credentials), forwarding the operator's id so the ser
+ | `GET /api/shipments/{orderId}`                     | `orders:read` + `dispatch:read` | orders `GET /orders/{id}` and dispatch `GET /consignments/by-order/{id}`, joined |
+ | `GET /healthz`, `GET /readyz`                      | none                            | — (probes)                                                                       |
+ 
+-Requests are validated against JSON schemas before any upstream is called. Upstream answers below 500 are relayed as
++Requests are validated against JSON schemas before any upstream is called. Reads are retried twice with backoff
++when an upstream times out or answers 502/503/504; writes are not retried, and a placed order's `Idempotency-Key` is
++forwarded so that a retried submission places one order. Each client address may make 300 requests a minute. Upstream answers below 500 are relayed as
+ they are; timeouts become 504 and unavailable or failing upstreams 502, as problem details.
+ 
+ ## Build and run

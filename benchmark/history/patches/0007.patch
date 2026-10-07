@@ -1,0 +1,389 @@
+From 2d26c136eefbdf25437605c58c1b7b8f37d89aed Mon Sep 17 00:00:00 2001
+From: Ines Halvard <ines.halvard@example.invalid>
+Date: Tue, 4 Aug 2026 10:12:07 +0200
+Subject: build: container image and Kubernetes manifests with the ingress and
+ authentication proxy
+
+---
+ .dockerignore                   |  12 ++++
+ .env.example                    |  15 +++++
+ Dockerfile                      |  23 +++++++
+ deploy/k8s/deployment.yaml      | 102 ++++++++++++++++++++++++++++++++
+ deploy/k8s/external-secret.yaml |  18 ++++++
+ deploy/k8s/ingress.yaml         |  30 ++++++++++
+ deploy/k8s/namespace.yaml       |  12 ++++
+ deploy/k8s/networkpolicy.yaml   |  83 ++++++++++++++++++++++++++
+ deploy/k8s/service.yaml         |  13 ++++
+ 9 files changed, 308 insertions(+)
+ create mode 100644 .dockerignore
+ create mode 100644 .env.example
+ create mode 100644 Dockerfile
+ create mode 100644 deploy/k8s/deployment.yaml
+ create mode 100644 deploy/k8s/external-secret.yaml
+ create mode 100644 deploy/k8s/ingress.yaml
+ create mode 100644 deploy/k8s/namespace.yaml
+ create mode 100644 deploy/k8s/networkpolicy.yaml
+ create mode 100644 deploy/k8s/service.yaml
+
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..3094446
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,12 @@
++node_modules/
++dist/
++coverage/
++.git/
++.github/
++deploy/
++docs/
++tests/
++benchmark/
++contracts/
++*.md
++.env*
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..0df2d31
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,15 @@
++# Local development. Copy to .env and fill in; .env is ignored by git.
++HOST=127.0.0.1
++PORT=8080
++LOG_LEVEL=debug
++OIDC_ISSUER=https://id.quellbrook.example/realms/operations
++OIDC_AUDIENCE=quellbrook-console
++OIDC_JWKS_URL=https://id.quellbrook.example/realms/operations/protocol/openid-connect/certs
++TOKEN_URL=https://id.quellbrook.example/realms/operations/protocol/openid-connect/token
++GATEWAY_CLIENT_ID=quellbrook-gateway-dev
++# Ask the Edge team for a development client; never commit it.
++GATEWAY_CLIENT_SECRET=
++ORDERS_API_URL=http://localhost:5101
++DISPATCH_API_URL=http://localhost:5102
++UPSTREAM_TIMEOUT_MS=5000
++CORS_ORIGINS=http://localhost:5173
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..f3c08e0
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,23 @@
++# syntax=docker/dockerfile:1
++# docker build -t ghcr.io/code-assurance-initiative/quellbrook-gateway .
++#
++# Base image pinned by digest (the node:22-alpine tag at the last bump); Dependabot proposes the next digest.
++# No HEALTHCHECK: the image runs only on Kubernetes, which ignores it; probes live in deploy/k8s/deployment.yaml.
++FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
++WORKDIR /app
++COPY package.json package-lock.json ./
++RUN npm ci --ignore-scripts
++COPY tsconfig.json tsconfig.build.json ./
++COPY src/ src/
++RUN npm run build && npm prune --omit=dev
++
++FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
++WORKDIR /app
++ENV NODE_ENV=production
++COPY --from=build /app/package.json ./
++COPY --from=build /app/node_modules/ node_modules/
++COPY --from=build /app/dist/ dist/
++EXPOSE 8080
++# An unprivileged UID above any host account range, by number so the kubelet can verify runAsNonRoot.
++USER 10001:10001
++CMD ["node", "dist/main.js"]
+diff --git a/deploy/k8s/deployment.yaml b/deploy/k8s/deployment.yaml
+new file mode 100644
+index 0000000..d9e9776
+--- /dev/null
++++ b/deploy/k8s/deployment.yaml
+@@ -0,0 +1,102 @@
++apiVersion: v1
++kind: ServiceAccount
++metadata:
++  name: quellbrook-gateway
++  namespace: quellbrook-edge
++automountServiceAccountToken: false
++---
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: quellbrook-gateway
++  namespace: quellbrook-edge
++  labels:
++    app.kubernetes.io/name: quellbrook-gateway
++    app.kubernetes.io/part-of: quellbrook
++spec:
++  replicas: 2
++  revisionHistoryLimit: 5
++  strategy:
++    type: RollingUpdate
++    rollingUpdate:
++      maxUnavailable: 0
++      maxSurge: 1
++  selector:
++    matchLabels:
++      app.kubernetes.io/name: quellbrook-gateway
++  template:
++    metadata:
++      annotations:
++        linkerd.io/inject: enabled
++      labels:
++        app.kubernetes.io/name: quellbrook-gateway
++        app.kubernetes.io/part-of: quellbrook
++    spec:
++      serviceAccountName: quellbrook-gateway
++      automountServiceAccountToken: false
++      securityContext:
++        runAsNonRoot: true
++        runAsUser: 10001
++        runAsGroup: 10001
++        seccompProfile:
++          type: RuntimeDefault
++      containers:
++        - name: gateway
++          image: ghcr.io/code-assurance-initiative/quellbrook-gateway@sha256:2ca7d6cce84de8f45bae87cce2a68b8e42ea84dddf24d3e65b18f313d2dd29ae
++          imagePullPolicy: IfNotPresent
++          ports:
++            - name: http
++              containerPort: 8080
++          env:
++            - name: OIDC_ISSUER
++              value: https://id.quellbrook.example/realms/operations
++            - name: OIDC_JWKS_URL
++              value: https://id.quellbrook.example/realms/operations/protocol/openid-connect/certs
++            - name: TOKEN_URL
++              value: https://id.quellbrook.example/realms/operations/protocol/openid-connect/token
++            - name: ORDERS_API_URL
++              value: http://quellbrook-orders.quellbrook-orders.svc.cluster.local
++            - name: DISPATCH_API_URL
++              value: http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local
++            - name: CORS_ORIGINS
++              value: https://ops.quellbrook.example
++            - name: GATEWAY_CLIENT_SECRET
++              valueFrom:
++                secretKeyRef:
++                  name: quellbrook-gateway-client
++                  key: client-secret
++          readinessProbe:
++            httpGet:
++              path: /readyz
++              port: http
++            periodSeconds: 5
++            failureThreshold: 3
++          livenessProbe:
++            httpGet:
++              path: /healthz
++              port: http
++            periodSeconds: 10
++            failureThreshold: 6
++          resources:
++            requests:
++              cpu: 100m
++              memory: 128Mi
++            limits:
++              cpu: '1'
++              memory: 256Mi
++          securityContext:
++            allowPrivilegeEscalation: false
++            readOnlyRootFilesystem: true
++            capabilities:
++              drop: ['ALL']
++---
++apiVersion: policy/v1
++kind: PodDisruptionBudget
++metadata:
++  name: quellbrook-gateway
++  namespace: quellbrook-edge
++spec:
++  minAvailable: 1
++  selector:
++    matchLabels:
++      app.kubernetes.io/name: quellbrook-gateway
+diff --git a/deploy/k8s/external-secret.yaml b/deploy/k8s/external-secret.yaml
+new file mode 100644
+index 0000000..05d57e8
+--- /dev/null
++++ b/deploy/k8s/external-secret.yaml
+@@ -0,0 +1,18 @@
++# The gateway's client secret lives in the platform's secret store; External Secrets Operator materialises it.
++apiVersion: external-secrets.io/v1
++kind: ExternalSecret
++metadata:
++  name: quellbrook-gateway-client
++  namespace: quellbrook-edge
++spec:
++  refreshInterval: 1h
++  secretStoreRef:
++    kind: ClusterSecretStore
++    name: quellbrook-vault
++  target:
++    name: quellbrook-gateway-client
++  data:
++    - secretKey: client-secret
++      remoteRef:
++        key: edge/gateway-client
++        property: client-secret
+diff --git a/deploy/k8s/ingress.yaml b/deploy/k8s/ingress.yaml
+new file mode 100644
+index 0000000..cf2ceae
+--- /dev/null
++++ b/deploy/k8s/ingress.yaml
+@@ -0,0 +1,30 @@
++# /api on the console's host. TLS terminates at the ingress controller; the authentication proxy (oauth2-proxy, run by
++# the platform team) signs operators in at the identity provider and forwards their access token, which the gateway
++# verifies again.
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: quellbrook-gateway
++  namespace: quellbrook-edge
++  annotations:
++    cert-manager.io/cluster-issuer: letsencrypt
++    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
++    nginx.ingress.kubernetes.io/auth-url: http://oauth2-proxy.auth.svc.cluster.local/oauth2/auth
++    nginx.ingress.kubernetes.io/auth-signin: https://ops.quellbrook.example/oauth2/start?rd=$escaped_request_uri
++    nginx.ingress.kubernetes.io/auth-response-headers: Authorization
++spec:
++  ingressClassName: nginx
++  tls:
++    - hosts: [ops.quellbrook.example]
++      secretName: ops-quellbrook-tls
++  rules:
++    - host: ops.quellbrook.example
++      http:
++        paths:
++          - path: /api
++            pathType: Prefix
++            backend:
++              service:
++                name: quellbrook-gateway
++                port:
++                  name: http
+diff --git a/deploy/k8s/namespace.yaml b/deploy/k8s/namespace.yaml
+new file mode 100644
+index 0000000..52fb988
+--- /dev/null
++++ b/deploy/k8s/namespace.yaml
+@@ -0,0 +1,12 @@
++apiVersion: v1
++kind: Namespace
++metadata:
++  name: quellbrook-edge
++  annotations:
++    # Every pod gets the mesh sidecar: in-cluster traffic is mutual TLS (docs/architecture.md).
++    linkerd.io/inject: enabled
++  labels:
++    app.kubernetes.io/part-of: quellbrook
++    quellbrook.example/team: edge
++    pod-security.kubernetes.io/enforce: restricted
++    pod-security.kubernetes.io/enforce-version: latest
+diff --git a/deploy/k8s/networkpolicy.yaml b/deploy/k8s/networkpolicy.yaml
+new file mode 100644
+index 0000000..693345f
+--- /dev/null
++++ b/deploy/k8s/networkpolicy.yaml
+@@ -0,0 +1,83 @@
++# Default deny in both directions, then one allowance per real flow.
++apiVersion: networking.k8s.io/v1
++kind: NetworkPolicy
++metadata:
++  name: default-deny
++  namespace: quellbrook-edge
++spec:
++  podSelector: {}
++  policyTypes: ['Ingress', 'Egress']
++---
++apiVersion: networking.k8s.io/v1
++kind: NetworkPolicy
++metadata:
++  name: allow-dns
++  namespace: quellbrook-edge
++spec:
++  podSelector: {}
++  policyTypes: ['Egress']
++  egress:
++    - to:
++        - namespaceSelector:
++            matchLabels:
++              kubernetes.io/metadata.name: kube-system
++          podSelector:
++            matchLabels:
++              k8s-app: kube-dns
++      ports:
++        - protocol: UDP
++          port: 53
++        - protocol: TCP
++          port: 53
++---
++apiVersion: networking.k8s.io/v1
++kind: NetworkPolicy
++metadata:
++  name: gateway-from-ingress
++  namespace: quellbrook-edge
++spec:
++  podSelector:
++    matchLabels:
++      app.kubernetes.io/name: quellbrook-gateway
++  policyTypes: ['Ingress']
++  ingress:
++    - from:
++        - namespaceSelector:
++            matchLabels:
++              kubernetes.io/metadata.name: ingress-nginx
++      ports:
++        - protocol: TCP
++          port: 8080
++---
++apiVersion: networking.k8s.io/v1
++kind: NetworkPolicy
++metadata:
++  name: gateway-egress
++  namespace: quellbrook-edge
++spec:
++  podSelector:
++    matchLabels:
++      app.kubernetes.io/name: quellbrook-gateway
++  policyTypes: ['Egress']
++  egress:
++    - to:
++        - namespaceSelector:
++            matchLabels:
++              kubernetes.io/metadata.name: quellbrook-orders
++      ports:
++        - protocol: TCP
++          port: 8080
++    - to:
++        - namespaceSelector:
++            matchLabels:
++              kubernetes.io/metadata.name: quellbrook-dispatch
++      ports:
++        - protocol: TCP
++          port: 8080
++    - to:
++        - namespaceSelector:
++            matchLabels:
++              kubernetes.io/metadata.name: identity
++      ports:
++        - protocol: TCP
++          port: 443
+diff --git a/deploy/k8s/service.yaml b/deploy/k8s/service.yaml
+new file mode 100644
+index 0000000..bca598c
+--- /dev/null
++++ b/deploy/k8s/service.yaml
+@@ -0,0 +1,13 @@
++apiVersion: v1
++kind: Service
++metadata:
++  name: quellbrook-gateway
++  namespace: quellbrook-edge
++spec:
++  type: ClusterIP
++  selector:
++    app.kubernetes.io/name: quellbrook-gateway
++  ports:
++    - name: http
++      port: 80
++      targetPort: http

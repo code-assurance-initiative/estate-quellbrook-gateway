@@ -1,0 +1,100 @@
+From 38ef74ef0fca89f3f3e5d42f10095507d0b96008 Mon Sep 17 00:00:00 2001
+From: Teodor Vasko <teodor.vasko@example.invalid>
+Date: Wed, 12 Aug 2026 14:08:16 +0200
+Subject: feat: cancel orders from the console
+
+---
+ src/routes/orders-routes.ts             | 25 +++++++++++++++++++++++++
+ src/upstream/orders-api.ts              |  9 +++++++++
+ tests/integration/orders-routes.test.ts | 16 ++++++++++++++++
+ 3 files changed, 50 insertions(+)
+
+diff --git a/src/routes/orders-routes.ts b/src/routes/orders-routes.ts
+index ce49842..81a5b34 100644
+--- a/src/routes/orders-routes.ts
++++ b/src/routes/orders-routes.ts
+@@ -90,6 +90,31 @@ export function ordersRoutes(app: FastifyInstance, dependencies: OrdersRouteDepe
+     async (request, reply) =>
+       relay(reply, await dependencies.orders.place(operatorOf(request), request.body)),
+   );
++
++  app.post<{ Params: { orderId: string }; Body: { reason: string } }>(
++    '/api/orders/:orderId/cancellation',
++    {
++      preHandler: [signedIn, requireScope('orders:write')],
++      schema: {
++        params: { type: 'object', required: ['orderId'], properties: { orderId: uuid } },
++        body: {
++          type: 'object',
++          required: ['reason'],
++          additionalProperties: false,
++          properties: { reason: { type: 'string', minLength: 1, maxLength: 200 } },
++        },
++      },
++    },
++    async (request, reply) =>
++      relay(
++        reply,
++        await dependencies.orders.cancel(
++          operatorOf(request),
++          request.params.orderId,
++          request.body.reason,
++        ),
++      ),
++  );
+ }
+ 
+ export function operatorOf(request: { operator?: { id: string } }): string {
+diff --git a/src/upstream/orders-api.ts b/src/upstream/orders-api.ts
+index b326f29..d909f2d 100644
+--- a/src/upstream/orders-api.ts
++++ b/src/upstream/orders-api.ts
+@@ -10,6 +10,7 @@ export interface OrdersApi {
+   list(operatorId: string, query: OrderListQuery): Promise<UpstreamResponse>;
+   get(operatorId: string, orderId: string): Promise<UpstreamResponse>;
+   place(operatorId: string, order: unknown): Promise<UpstreamResponse>;
++  cancel(operatorId: string, orderId: string, reason: string): Promise<UpstreamResponse>;
+ }
+ 
+ export function createOrdersApi(client: UpstreamClient): OrdersApi {
+@@ -31,5 +32,13 @@ export function createOrdersApi(client: UpstreamClient): OrdersApi {
+     place(operatorId, order) {
+       return client.send({ method: 'POST', path: '/orders', operatorId, body: order });
+     },
++    cancel(operatorId, orderId, reason) {
++      return client.send({
++        method: 'POST',
++        path: `/orders/${encodeURIComponent(orderId)}/cancellation`,
++        operatorId,
++        body: { reason },
++      });
++    },
+   };
+ }
+diff --git a/tests/integration/orders-routes.test.ts b/tests/integration/orders-routes.test.ts
+index 108d1da..42d8c16 100644
+--- a/tests/integration/orders-routes.test.ts
++++ b/tests/integration/orders-routes.test.ts
+@@ -80,6 +80,22 @@ describe('order routes', () => {
+     expect(response.headers['content-type']).toContain('application/problem+json');
+   });
+ 
++  it('cancels an order with a reason', async () => {
++    test.orders.answer(new Response(null, { status: 204 }));
++
++    const response = await test.app.inject({
++      method: 'POST',
++      url: '/api/orders/0198f1a2-0000-7000-8000-000000000001/cancellation',
++      payload: { reason: 'Shipper withdrew the order' },
++      headers: await test.bearer(['orders:write']),
++    });
++
++    expect(response.statusCode).toBe(204);
++    expect(test.orders.calls.at(-1)?.url).toBe(
++      'http://orders.test/orders/0198f1a2-0000-7000-8000-000000000001/cancellation',
++    );
++  });
++
+   it('refuses a malformed order before calling the order service', async () => {
+     const calls = test.orders.calls.length;
+ 

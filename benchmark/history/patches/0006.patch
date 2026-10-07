@@ -1,0 +1,551 @@
+From f3cc6db25c86e0f84f55b3ae7864a66d5351c3ab Mon Sep 17 00:00:00 2001
+From: Teodor Vasko <teodor.vasko@example.invalid>
+Date: Mon, 3 Aug 2026 14:50:33 +0200
+Subject: feat: order routes, health probes, security headers and CORS
+
+---
+ src/app.ts                              |  50 ++++++++
+ src/main.ts                             |  40 +++++++
+ src/routes/health-routes.ts             |   7 ++
+ src/routes/orders-routes.ts             | 112 ++++++++++++++++++
+ tests/integration/orders-routes.test.ts | 144 ++++++++++++++++++++++++
+ tests/integration/platform.test.ts      |  50 ++++++++
+ tests/support/test-app.ts               |  44 ++++++++
+ tests/unit/helpers.test.ts              |  32 ++++++
+ 8 files changed, 479 insertions(+)
+ create mode 100644 src/app.ts
+ create mode 100644 src/main.ts
+ create mode 100644 src/routes/health-routes.ts
+ create mode 100644 src/routes/orders-routes.ts
+ create mode 100644 tests/integration/orders-routes.test.ts
+ create mode 100644 tests/integration/platform.test.ts
+ create mode 100644 tests/support/test-app.ts
+ create mode 100644 tests/unit/helpers.test.ts
+
+diff --git a/src/app.ts b/src/app.ts
+new file mode 100644
+index 0000000..18322da
+--- /dev/null
++++ b/src/app.ts
+@@ -0,0 +1,50 @@
++import cors from '@fastify/cors';
++import helmet from '@fastify/helmet';
++import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
++import type { OperatorVerifier } from './auth/operator-auth.js';
++import { sendProblem } from './http/problem.js';
++import { healthRoutes } from './routes/health-routes.js';
++import { ordersRoutes } from './routes/orders-routes.js';
++import type { OrdersApi } from './upstream/orders-api.js';
++import { UpstreamError } from './upstream/upstream-client.js';
++
++export interface AppDependencies {
++  readonly logger: FastifyBaseLogger;
++  readonly verifier: OperatorVerifier;
++  readonly orders: OrdersApi;
++  readonly corsOrigins: readonly string[];
++}
++
++/** Builds the gateway: security headers, CORS for the console, operator routes and health probes. */
++export async function buildApp(dependencies: AppDependencies): Promise<FastifyInstance> {
++  const app = Fastify({
++    loggerInstance: dependencies.logger,
++    trustProxy: true,
++    requestIdHeader: 'x-request-id',
++  });
++
++  await app.register(helmet, {
++    contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } },
++    hsts: { maxAge: 31_536_000, includeSubDomains: true },
++  });
++  await app.register(cors, { origin: [...dependencies.corsOrigins], credentials: true });
++
++  app.setErrorHandler((error: FastifyError, request, reply) => {
++    if (error instanceof UpstreamError) {
++      return sendProblem(
++        reply,
++        error.failure === 'timeout' ? 504 : 502,
++        `The ${error.upstream} service did not answer. Try again in a moment.`,
++      );
++    }
++    if (error.validation) {
++      return sendProblem(reply, 400, error.message);
++    }
++    request.log.error({ err: error }, 'unhandled error');
++    return sendProblem(reply, 500, 'Something went wrong on our side.');
++  });
++
++  healthRoutes(app);
++  ordersRoutes(app, dependencies);
++  return app;
++}
+diff --git a/src/main.ts b/src/main.ts
+new file mode 100644
+index 0000000..4fa9ba5
+--- /dev/null
++++ b/src/main.ts
+@@ -0,0 +1,40 @@
++import { pino } from 'pino';
++import { buildApp } from './app.js';
++import { createOperatorVerifier, remoteKeys } from './auth/operator-auth.js';
++import { loadConfig } from './config.js';
++import { loggerOptions } from './logger.js';
++import { createOrdersApi } from './upstream/orders-api.js';
++import { createServiceTokenSource } from './upstream/service-token.js';
++import { createUpstreamClient } from './upstream/upstream-client.js';
++
++const config = loadConfig(process.env);
++const logger = pino(loggerOptions(config.logLevel));
++const tokens = createServiceTokenSource(config.serviceIdentity, fetch);
++const upstream = (name: string, baseUrl: string) =>
++  createUpstreamClient({
++    name,
++    baseUrl,
++    timeoutMs: config.upstreams.timeoutMs,
++    tokens,
++    fetch,
++    logger: logger.child({ component: 'upstream' }),
++  });
++
++const app = await buildApp({
++  logger,
++  verifier: createOperatorVerifier(
++    config.operatorTokens,
++    remoteKeys(config.operatorTokens.jwksUrl),
++  ),
++  orders: createOrdersApi(upstream('orders', config.upstreams.orders)),
++  corsOrigins: config.corsOrigins,
++});
++
++for (const signal of ['SIGTERM', 'SIGINT'] as const) {
++  process.once(signal, () => {
++    app.log.info({ signal }, 'shutting down');
++    void app.close().then(() => process.exit(0));
++  });
++}
++
++await app.listen({ host: config.host, port: config.port });
+diff --git a/src/routes/health-routes.ts b/src/routes/health-routes.ts
+new file mode 100644
+index 0000000..8baa60d
+--- /dev/null
++++ b/src/routes/health-routes.ts
+@@ -0,0 +1,7 @@
++import type { FastifyInstance } from 'fastify';
++
++/** Liveness and readiness for the kubelet. They report a status word and nothing else, and need no sign-in. */
++export function healthRoutes(app: FastifyInstance): void {
++  app.get('/healthz', (_request, reply) => reply.send({ status: 'ok' }));
++  app.get('/readyz', (_request, reply) => reply.send({ status: 'ready' }));
++}
+diff --git a/src/routes/orders-routes.ts b/src/routes/orders-routes.ts
+new file mode 100644
+index 0000000..ce49842
+--- /dev/null
++++ b/src/routes/orders-routes.ts
+@@ -0,0 +1,112 @@
++import type { FastifyInstance, FastifyReply } from 'fastify';
++import { authenticate, requireScope, type OperatorVerifier } from '../auth/operator-auth.js';
++import type { OrdersApi } from '../upstream/orders-api.js';
++import type { UpstreamResponse } from '../upstream/upstream-client.js';
++
++export interface OrdersRouteDependencies {
++  readonly verifier: OperatorVerifier;
++  readonly orders: OrdersApi;
++}
++
++const uuid = { type: 'string', format: 'uuid' } as const;
++
++const orderBody = {
++  type: 'object',
++  required: ['customerAccountId', 'serviceLevel', 'consignee', 'parcels'],
++  additionalProperties: false,
++  properties: {
++    customerAccountId: { type: 'string', pattern: '^QB-[0-9]{4,12}$' },
++    serviceLevel: { type: 'string', enum: ['standard', 'express'] },
++    consignee: {
++      type: 'object',
++      required: ['name', 'line1', 'postalCode', 'city', 'countryCode'],
++      additionalProperties: false,
++      properties: {
++        name: { type: 'string', minLength: 1, maxLength: 100 },
++        line1: { type: 'string', minLength: 1, maxLength: 100 },
++        line2: { type: 'string', maxLength: 100 },
++        postalCode: { type: 'string', minLength: 1, maxLength: 10 },
++        city: { type: 'string', minLength: 1, maxLength: 60 },
++        countryCode: { type: 'string', enum: ['DK', 'SE', 'NO', 'DE', 'NL'] },
++        email: { type: 'string', maxLength: 254 },
++        phone: { type: 'string', maxLength: 20 },
++      },
++    },
++    parcels: {
++      type: 'array',
++      minItems: 1,
++      maxItems: 20,
++      items: {
++        type: 'object',
++        required: ['weightGrams', 'lengthCm', 'widthCm', 'heightCm'],
++        additionalProperties: false,
++        properties: {
++          weightGrams: { type: 'integer', minimum: 1, maximum: 31_500 },
++          lengthCm: { type: 'integer', minimum: 1, maximum: 175 },
++          widthCm: { type: 'integer', minimum: 1, maximum: 175 },
++          heightCm: { type: 'integer', minimum: 1, maximum: 175 },
++        },
++      },
++    },
++  },
++} as const;
++
++/** Customer service: list, read and place orders. */
++export function ordersRoutes(app: FastifyInstance, dependencies: OrdersRouteDependencies): void {
++  const signedIn = authenticate(dependencies.verifier);
++
++  app.get<{ Querystring: { page: number; pageSize: number } }>(
++    '/api/orders',
++    {
++      preHandler: [signedIn, requireScope('orders:read')],
++      schema: {
++        querystring: {
++          type: 'object',
++          additionalProperties: false,
++          properties: {
++            page: { type: 'integer', minimum: 1, default: 1 },
++            pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 25 },
++          },
++        },
++      },
++    },
++    async (request, reply) =>
++      relay(reply, await dependencies.orders.list(operatorOf(request), request.query)),
++  );
++
++  app.get<{ Params: { orderId: string } }>(
++    '/api/orders/:orderId',
++    {
++      preHandler: [signedIn, requireScope('orders:read')],
++      schema: { params: { type: 'object', required: ['orderId'], properties: { orderId: uuid } } },
++    },
++    async (request, reply) =>
++      relay(reply, await dependencies.orders.get(operatorOf(request), request.params.orderId)),
++  );
++
++  app.post(
++    '/api/orders',
++    { preHandler: [signedIn, requireScope('orders:write')], schema: { body: orderBody } },
++    async (request, reply) =>
++      relay(reply, await dependencies.orders.place(operatorOf(request), request.body)),
++  );
++}
++
++export function operatorOf(request: { operator?: { id: string } }): string {
++  if (!request.operator) {
++    throw new Error('Route registered without the authenticate pre-handler.');
++  }
++  return request.operator.id;
++}
++
++/** Relays a downstream answer; a Location into the service is rewritten to the gateway's /api path. */
++export function relay(reply: FastifyReply, response: UpstreamResponse): FastifyReply {
++  void reply.code(response.status);
++  if (response.contentType) {
++    void reply.type(response.contentType);
++  }
++  if (response.location?.startsWith('/')) {
++    void reply.header('location', `/api${response.location}`);
++  }
++  return response.body === undefined ? reply.send() : reply.send(response.body);
++}
+diff --git a/tests/integration/orders-routes.test.ts b/tests/integration/orders-routes.test.ts
+new file mode 100644
+index 0000000..108d1da
+--- /dev/null
++++ b/tests/integration/orders-routes.test.ts
+@@ -0,0 +1,144 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { json } from '../support/fake-upstream.js';
++import { createTestApp, type TestApp } from '../support/test-app.js';
++
++const order = {
++  customerAccountId: 'QB-104233',
++  serviceLevel: 'standard',
++  consignee: {
++    name: 'Halden Bikes ApS',
++    line1: 'Søndergade 12',
++    postalCode: '8000',
++    city: 'Aarhus C',
++    countryCode: 'DK',
++  },
++  parcels: [{ weightGrams: 2400, lengthCm: 40, widthCm: 30, heightCm: 20 }],
++};
++
++describe('order routes', () => {
++  let test: TestApp;
++  beforeAll(async () => {
++    test = await createTestApp();
++  });
++  afterAll(async () => {
++    await test.app.close();
++  });
++
++  it('lists orders through the order service with the service token and the operator id', async () => {
++    test.orders.answer(json(200, { items: [], page: 2, pageSize: 10, totalCount: 0 }));
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: '/api/orders?page=2&pageSize=10',
++      headers: await test.bearer(['orders:read'], 'operator-4'),
++    });
++
++    expect(response.statusCode).toBe(200);
++    const call = test.orders.calls.at(-1);
++    expect(call?.url).toBe('http://orders.test/orders?page=2&pageSize=10');
++    expect(call?.headers.authorization).toBe('Bearer service-token-for-tests');
++    expect(call?.headers['x-quellbrook-operator']).toBe('operator-4');
++  });
++
++  it('places an order and points Location at the gateway path', async () => {
++    test.orders.answer(
++      json(
++        201,
++        { id: '0198f1a2-0000-7000-8000-000000000001' },
++        { location: '/orders/0198f1a2-0000-7000-8000-000000000001' },
++      ),
++    );
++
++    const response = await test.app.inject({
++      method: 'POST',
++      url: '/api/orders',
++      payload: order,
++      headers: await test.bearer(['orders:write']),
++    });
++
++    expect(response.statusCode).toBe(201);
++    expect(response.headers.location).toBe('/api/orders/0198f1a2-0000-7000-8000-000000000001');
++    expect(test.orders.calls.at(-1)?.body).toEqual(order);
++  });
++
++  it('relays the order service answer for one order, including its 404', async () => {
++    test.orders.answer(
++      json(
++        404,
++        { title: 'Not Found', status: 404 },
++        { 'content-type': 'application/problem+json' },
++      ),
++    );
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: '/api/orders/0198f1a2-0000-7000-8000-000000000009',
++      headers: await test.bearer(['orders:read']),
++    });
++
++    expect(response.statusCode).toBe(404);
++    expect(response.headers['content-type']).toContain('application/problem+json');
++  });
++
++  it('refuses a malformed order before calling the order service', async () => {
++    const calls = test.orders.calls.length;
++
++    const response = await test.app.inject({
++      method: 'POST',
++      url: '/api/orders',
++      payload: { ...order, serviceLevel: 'overnight' },
++      headers: await test.bearer(['orders:write']),
++    });
++
++    expect(response.statusCode).toBe(400);
++    expect(test.orders.calls.length).toBe(calls);
++  });
++
++  it('refuses an order id that is not a UUID', async () => {
++    const response = await test.app.inject({
++      method: 'GET',
++      url: '/api/orders/..%2Fadmin',
++      headers: await test.bearer(['orders:read']),
++    });
++
++    expect(response.statusCode).toBe(400);
++  });
++
++  it('needs a valid operator token and the right scope', async () => {
++    const anonymous = await test.app.inject({ method: 'GET', url: '/api/orders' });
++    const forged = await test.app.inject({
++      method: 'GET',
++      url: '/api/orders',
++      headers: { authorization: 'Bearer not-a-token' },
++    });
++    const wrongScope = await test.app.inject({
++      method: 'POST',
++      url: '/api/orders',
++      payload: order,
++      headers: await test.bearer(['orders:read']),
++    });
++
++    expect(anonymous.statusCode).toBe(401);
++    expect(anonymous.headers['www-authenticate']).toBe('Bearer');
++    expect(forged.statusCode).toBe(401);
++    expect(wrongScope.statusCode).toBe(403);
++  });
++
++  it('turns an unavailable order service into 502 and a slow one into 504', async () => {
++    test.orders.answer(json(503, {}), new DOMException('timed out', 'TimeoutError'));
++
++    const failed = await test.app.inject({
++      method: 'GET',
++      url: '/api/orders',
++      headers: await test.bearer(['orders:read']),
++    });
++    const slow = await test.app.inject({
++      method: 'GET',
++      url: '/api/orders',
++      headers: await test.bearer(['orders:read']),
++    });
++
++    expect(failed.statusCode).toBe(502);
++    expect(slow.statusCode).toBe(504);
++  });
++});
+diff --git a/tests/integration/platform.test.ts b/tests/integration/platform.test.ts
+new file mode 100644
+index 0000000..fb033c3
+--- /dev/null
++++ b/tests/integration/platform.test.ts
+@@ -0,0 +1,50 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { createTestApp, type TestApp } from '../support/test-app.js';
++
++describe('platform', () => {
++  let test: TestApp;
++  beforeAll(async () => {
++    test = await createTestApp();
++  });
++  afterAll(async () => {
++    await test.app.close();
++  });
++
++  it.each(['/healthz', '/readyz'])('answers %s without a token', async (url) => {
++    const response = await test.app.inject({ method: 'GET', url });
++
++    expect(response.statusCode).toBe(200);
++  });
++
++  it('sends security headers', async () => {
++    const response = await test.app.inject({ method: 'GET', url: '/healthz' });
++
++    expect(response.headers['content-security-policy']).toContain("default-src 'none'");
++    expect(response.headers['x-content-type-options']).toBe('nosniff');
++    expect(response.headers['strict-transport-security']).toContain('max-age=31536000');
++  });
++
++  it('allows the console origin with credentials', async () => {
++    const response = await test.app.inject({
++      method: 'GET',
++      url: '/healthz',
++      headers: { origin: 'https://ops.test' },
++    });
++
++    expect(response.headers['access-control-allow-origin']).toBe('https://ops.test');
++    expect(response.headers['access-control-allow-credentials']).toBe('true');
++  });
++
++  it('answers an unexpected failure with a generic problem', async () => {
++    const fresh = await createTestApp();
++    fresh.app.get('/boom', () => {
++      throw new Error('kaboom');
++    });
++
++    const response = await fresh.app.inject({ method: 'GET', url: '/boom' });
++    await fresh.app.close();
++
++    expect(response.statusCode).toBe(500);
++    expect(response.body).not.toContain('kaboom');
++  });
++});
+diff --git a/tests/support/test-app.ts b/tests/support/test-app.ts
+new file mode 100644
+index 0000000..d9c6036
+--- /dev/null
++++ b/tests/support/test-app.ts
+@@ -0,0 +1,44 @@
++import type { FastifyInstance } from 'fastify';
++import { pino } from 'pino';
++import { buildApp } from '../../src/app.js';
++import { createOperatorVerifier } from '../../src/auth/operator-auth.js';
++import { createOrdersApi } from '../../src/upstream/orders-api.js';
++import { createUpstreamClient } from '../../src/upstream/upstream-client.js';
++import { FakeUpstream, fixedToken } from './fake-upstream.js';
++import { audience, createOperatorTokens, issuer, type OperatorTokens } from './operator-tokens.js';
++
++export interface TestApp {
++  readonly app: FastifyInstance;
++  readonly tokens: OperatorTokens;
++  readonly orders: FakeUpstream;
++  bearer(scopes: readonly string[], subject?: string): Promise<{ authorization: string }>;
++}
++
++export async function createTestApp(): Promise<TestApp> {
++  const tokens = await createOperatorTokens();
++  const orders = new FakeUpstream();
++  const logger = pino({ level: 'silent' });
++  const client = (name: string, baseUrl: string, upstream: FakeUpstream) =>
++    createUpstreamClient({
++      name,
++      baseUrl,
++      timeoutMs: 1_000,
++      tokens: fixedToken,
++      fetch: upstream.fetch,
++      logger,
++    });
++  const app = await buildApp({
++    logger,
++    verifier: createOperatorVerifier({ issuer, audience }, tokens.keys),
++    orders: createOrdersApi(client('orders', 'http://orders.test', orders)),
++    corsOrigins: ['https://ops.test'],
++  });
++  return {
++    app,
++    tokens,
++    orders,
++    bearer: async (scopes, subject = 'operator-17') => ({
++      authorization: `Bearer ${await tokens.sign(subject, scopes)}`,
++    }),
++  };
++}
+diff --git a/tests/unit/helpers.test.ts b/tests/unit/helpers.test.ts
+new file mode 100644
+index 0000000..a92eb9f
+--- /dev/null
++++ b/tests/unit/helpers.test.ts
+@@ -0,0 +1,32 @@
++import Fastify from 'fastify';
++import { describe, expect, it } from 'vitest';
++import { remoteKeys } from '../../src/auth/operator-auth.js';
++import { sendProblem } from '../../src/http/problem.js';
++import { loggerOptions } from '../../src/logger.js';
++
++describe('helpers', () => {
++  it('redacts the credentials of incoming requests in logs', () => {
++    expect(loggerOptions('info').redact).toEqual([
++      'req.headers.authorization',
++      'req.headers.cookie',
++    ]);
++  });
++
++  it('builds a remote key set for the identity provider without fetching it yet', () => {
++    expect(typeof remoteKeys('https://id.test/certs')).toBe('function');
++  });
++
++  it('gives an unlisted status a generic title', async () => {
++    const app = Fastify();
++    app.get('/teapot', (_request, reply) => sendProblem(reply, 418, 'short and stout'));
++
++    const response = await app.inject({ method: 'GET', url: '/teapot' });
++
++    expect(response.json()).toEqual({
++      type: 'about:blank',
++      title: 'Error',
++      status: 418,
++      detail: 'short and stout',
++    });
++  });
++});

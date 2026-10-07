@@ -1,0 +1,253 @@
+From 781177f332090f421c15ea80619efe2d64ce7b49 Mon Sep 17 00:00:00 2001
+From: Ines Halvard <ines.halvard@example.invalid>
+Date: Tue, 25 Aug 2026 11:29:13 +0200
+Subject: feat(upstream): retry idempotent reads with backoff
+
+Dispatch restarts during the morning planning left the board blank on a single 503; reads are now retried twice (100 ms, 200 ms). Writes are never retried by the gateway.
+---
+ src/upstream/upstream-client.ts         | 124 ++++++++++++++++--------
+ tests/integration/orders-routes.test.ts |   3 +-
+ tests/unit/upstream-client.test.ts      |  63 ++++++++++++
+ 3 files changed, 146 insertions(+), 44 deletions(-)
+
+diff --git a/src/upstream/upstream-client.ts b/src/upstream/upstream-client.ts
+index e97ea68..122f7ba 100644
+--- a/src/upstream/upstream-client.ts
++++ b/src/upstream/upstream-client.ts
+@@ -42,63 +42,101 @@ export interface UpstreamClientOptions {
+   readonly tokens: ServiceTokenSource;
+   readonly fetch: typeof fetch;
+   readonly logger: BaseLogger;
++  /** Extra attempts for idempotent reads (GET) after a timeout, an unreachable upstream or a 502/503/504. */
++  readonly retries?: number;
++  readonly sleep?: (milliseconds: number) => Promise<void>;
+ }
+ 
++const retryableStatuses = new Set([502, 503, 504]);
++const backoffMs = 100;
++
+ /**
+  * Calls one downstream service with the gateway's service token. Answers below 500 are relayed to the caller as they
+  * are (a 404 or a validation problem is the service's answer); timeouts, unreachable services and 5xx answers become
+- * an {@link UpstreamError}.
++ * an {@link UpstreamError}. Reads are retried with exponential backoff; writes are never retried here.
+  */
+ export function createUpstreamClient(options: UpstreamClientOptions): UpstreamClient {
++  const retries = options.retries ?? 2;
++  const sleep =
++    options.sleep ??
++    ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
++
++  async function attempt(
++    request: UpstreamRequest,
++    url: URL,
++    number: number,
++  ): Promise<Response | UpstreamError> {
++    const headers: Record<string, string> = {
++      accept: 'application/json',
++      authorization: `Bearer ${await options.tokens.token()}`,
++      'x-quellbrook-operator': request.operatorId,
++      ...request.headers,
++    };
++    if (request.body !== undefined) {
++      headers['content-type'] = 'application/json';
++    }
++    try {
++      const response = await options.fetch(url, {
++        method: request.method,
++        headers,
++        body: request.body === undefined ? null : JSON.stringify(request.body),
++        signal: AbortSignal.timeout(options.timeoutMs),
++      });
++      if (response.status < 500) {
++        return response;
++      }
++      options.logger.warn(
++        {
++          upstream: options.name,
++          method: request.method,
++          path: url.pathname,
++          status: response.status,
++          attempt: number,
++        },
++        'upstream call failed',
++      );
++      return new UpstreamError(options.name, 'error', response.status);
++    } catch (error) {
++      const failure: UpstreamFailure =
++        error instanceof DOMException && error.name === 'TimeoutError' ? 'timeout' : 'unavailable';
++      options.logger.warn(
++        {
++          upstream: options.name,
++          method: request.method,
++          path: url.pathname,
++          failure,
++          attempt: number,
++        },
++        'upstream call failed',
++      );
++      return new UpstreamError(options.name, failure);
++    }
++  }
++
+   return {
+     async send(request) {
+       const url = new URL(request.path, options.baseUrl);
+-      const headers: Record<string, string> = {
+-        accept: 'application/json',
+-        authorization: `Bearer ${await options.tokens.token()}`,
+-        'x-quellbrook-operator': request.operatorId,
+-        ...request.headers,
+-      };
+-      if (request.body !== undefined) {
+-        headers['content-type'] = 'application/json';
+-      }
+-      let response: Response;
+-      try {
+-        response = await options.fetch(url, {
+-          method: request.method,
+-          headers,
+-          body: request.body === undefined ? null : JSON.stringify(request.body),
+-          signal: AbortSignal.timeout(options.timeoutMs),
+-        });
+-      } catch (error) {
+-        const failure: UpstreamFailure =
+-          error instanceof DOMException && error.name === 'TimeoutError'
+-            ? 'timeout'
+-            : 'unavailable';
+-        options.logger.warn(
+-          { upstream: options.name, method: request.method, path: url.pathname, failure },
+-          'upstream call failed',
+-        );
+-        throw new UpstreamError(options.name, failure);
++      const attempts = request.method === 'GET' ? retries + 1 : 1;
++      let outcome: Response | UpstreamError = new UpstreamError(options.name, 'unavailable');
++      for (let number = 1; number <= attempts; number++) {
++        outcome = await attempt(request, url, number);
++        const retryable =
++          outcome instanceof UpstreamError &&
++          (outcome.status === undefined || retryableStatuses.has(outcome.status));
++        if (!retryable || number === attempts) {
++          break;
++        }
++        await sleep(backoffMs * 2 ** (number - 1));
+       }
+-      if (response.status >= 500) {
+-        options.logger.warn(
+-          {
+-            upstream: options.name,
+-            method: request.method,
+-            path: url.pathname,
+-            status: response.status,
+-          },
+-          'upstream call failed',
+-        );
+-        throw new UpstreamError(options.name, 'error', response.status);
++      if (outcome instanceof UpstreamError) {
++        throw outcome;
+       }
+-      const text = await response.text();
++      const text = await outcome.text();
+       return {
+-        status: response.status,
++        status: outcome.status,
+         body: text.length === 0 ? undefined : (JSON.parse(text) as unknown),
+-        ...optional('contentType', response.headers.get('content-type')),
+-        ...optional('location', response.headers.get('location')),
++        ...optional('contentType', outcome.headers.get('content-type')),
++        ...optional('location', outcome.headers.get('location')),
+       };
+     },
+   };
+diff --git a/tests/integration/orders-routes.test.ts b/tests/integration/orders-routes.test.ts
+index 42d8c16..e0c102e 100644
+--- a/tests/integration/orders-routes.test.ts
++++ b/tests/integration/orders-routes.test.ts
+@@ -141,7 +141,8 @@ describe('order routes', () => {
+   });
+ 
+   it('turns an unavailable order service into 502 and a slow one into 504', async () => {
+-    test.orders.answer(json(503, {}), new DOMException('timed out', 'TimeoutError'));
++    const timeout = new DOMException('timed out', 'TimeoutError');
++    test.orders.answer(json(503, {}), json(503, {}), json(503, {}), timeout, timeout, timeout);
+ 
+     const failed = await test.app.inject({
+       method: 'GET',
+diff --git a/tests/unit/upstream-client.test.ts b/tests/unit/upstream-client.test.ts
+index c7b1706..5f55f1c 100644
+--- a/tests/unit/upstream-client.test.ts
++++ b/tests/unit/upstream-client.test.ts
+@@ -11,6 +11,7 @@ const client = (upstream: FakeUpstream) =>
+     tokens: fixedToken,
+     fetch: upstream.fetch,
+     logger: pino({ level: 'silent' }),
++    retries: 0,
+   });
+ 
+ describe('upstream client', () => {
+@@ -42,3 +43,65 @@ describe('upstream client', () => {
+     expect(new UpstreamError('dispatch', 'error', 503).message).toBe('dispatch error (503)');
+   });
+ });
++
++describe('retries', () => {
++  const retrying = (upstream: FakeUpstream, delays: number[]) =>
++    createUpstreamClient({
++      name: 'dispatch',
++      baseUrl: 'http://dispatch.test',
++      timeoutMs: 1_000,
++      tokens: fixedToken,
++      fetch: upstream.fetch,
++      logger: pino({ level: 'silent' }),
++      sleep: (milliseconds) => {
++        delays.push(milliseconds);
++        return Promise.resolve();
++      },
++    });
++
++  it('retries a read after a 503 and an unreachable upstream, backing off', async () => {
++    const upstream = new FakeUpstream().answer(
++      new Response(null, { status: 503 }),
++      new TypeError('fetch failed'),
++      new Response('{"ok":true}', { status: 200 }),
++    );
++    const delays: number[] = [];
++
++    const response = await retrying(upstream, delays).send({
++      method: 'GET',
++      path: '/routes?date=2026-08-26',
++      operatorId: 'dispatcher-2',
++    });
++
++    expect(response.body).toEqual({ ok: true });
++    expect(upstream.calls).toHaveLength(3);
++    expect(delays).toEqual([100, 200]);
++  });
++
++  it('gives up after the last attempt', async () => {
++    const upstream = new FakeUpstream().always(new Response(null, { status: 502 }));
++
++    await expect(
++      retrying(upstream, []).send({ method: 'GET', path: '/routes', operatorId: 'dispatcher-2' }),
++    ).rejects.toMatchObject({ status: 502 });
++    expect(upstream.calls).toHaveLength(3);
++  });
++
++  it('never retries a write or a 500', async () => {
++    const writes = new FakeUpstream().always(new Response(null, { status: 503 }));
++    const failing = new FakeUpstream().always(new Response(null, { status: 500 }));
++
++    await expect(
++      retrying(writes, []).send({
++        method: 'POST',
++        path: '/routes/1/start',
++        operatorId: 'dispatcher-2',
++      }),
++    ).rejects.toBeInstanceOf(UpstreamError);
++    await expect(
++      retrying(failing, []).send({ method: 'GET', path: '/routes', operatorId: 'dispatcher-2' }),
++    ).rejects.toBeInstanceOf(UpstreamError);
++    expect(writes.calls).toHaveLength(1);
++    expect(failing.calls).toHaveLength(1);
++  });
++});

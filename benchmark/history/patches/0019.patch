@@ -1,0 +1,199 @@
+From d45ac40a20bbfd40479b2800a04356c1b66272e6 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Wed, 26 Aug 2026 14:15:52 +0200
+Subject: feat: rate limit per client address; plugin errors answered as
+ problems
+
+---
+ package-lock.json                  | 38 ++++++++++++++++++++++++++++++
+ package.json                       |  1 +
+ src/app.ts                         | 11 +++++++++
+ src/http/problem.ts                |  2 ++
+ tests/integration/platform.test.ts | 13 ++++++++++
+ tests/support/test-app.ts          |  5 +++-
+ 6 files changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/package-lock.json b/package-lock.json
+index 3d6bb76..9450e35 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -11,6 +11,7 @@
+       "dependencies": {
+         "@fastify/cors": "^11.3.0",
+         "@fastify/helmet": "^13.1.1",
++        "@fastify/rate-limit": "^11.2.0",
+         "fastify": "^5.12.5",
+         "jose": "^6.2.12",
+         "pino": "^10.4.0",
+@@ -405,6 +406,27 @@
+         "ipaddr.js": "^2.1.0"
+       }
+     },
++    "node_modules/@fastify/rate-limit": {
++      "version": "11.2.0",
++      "resolved": "https://registry.npmjs.org/@fastify/rate-limit/-/rate-limit-11.2.0.tgz",
++      "integrity": "sha512-X7osJd4XSvMoejYrnJkSZYYjY1eNYoBqhjlzf1RakC2204qExFqZFTKj5+T7VuzA/iUI9Z3UoSqQRkB2HpG0oQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "dependencies": {
++        "@lukeed/ms": "^2.0.2",
++        "fastify-plugin": "^6.0.0",
++        "ip-address": "^10.2.0",
++        "toad-cache": "^3.7.0"
++      }
++    },
+     "node_modules/@humanfs/core": {
+       "version": "0.19.2",
+       "resolved": "https://registry.npmjs.org/@humanfs/core/-/core-0.19.2.tgz",
+@@ -513,6 +535,14 @@
+       "integrity": "sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==",
+       "dev": true
+     },
++    "node_modules/@lukeed/ms": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/@lukeed/ms/-/ms-2.0.2.tgz",
++      "integrity": "sha512-9I2Zn6+NJLfaGoz9jN3lpwDgAYvfGeNYdbAIjJOqzs4Tpc+VU3Jqq4IofSUBKajiDS8k9fZIg18/z13mpk1bsA==",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.152.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.152.0.tgz",
+@@ -1886,6 +1916,14 @@
+         "node": ">=0.8.19"
+       }
+     },
++    "node_modules/ip-address": {
++      "version": "10.7.3",
++      "resolved": "https://registry.npmjs.org/ip-address/-/ip-address-10.7.3.tgz",
++      "integrity": "sha512-A1kdq/tSb5QjvKvAMgIoEvDBIgL7qaqVP/jkvSwYYRZ9iEzvPpopxp2wQfu3SuZRHtpHNxMn8Fs0bS+gf5Xmwg==",
++      "engines": {
++        "node": ">= 12"
++      }
++    },
+     "node_modules/ipaddr.js": {
+       "version": "2.5.0",
+       "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-2.5.0.tgz",
+diff --git a/package.json b/package.json
+index 0782fae..b8ea90a 100644
+--- a/package.json
++++ b/package.json
+@@ -22,6 +22,7 @@
+   "dependencies": {
+     "@fastify/cors": "^11.3.0",
+     "@fastify/helmet": "^13.1.1",
++    "@fastify/rate-limit": "^11.2.0",
+     "fastify": "^5.12.5",
+     "jose": "^6.2.12",
+     "pino": "^10.4.0",
+diff --git a/src/app.ts b/src/app.ts
+index 95bf25c..42562fc 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,5 +1,6 @@
+ import cors from '@fastify/cors';
+ import helmet from '@fastify/helmet';
++import rateLimit from '@fastify/rate-limit';
+ import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
+ import type { OperatorVerifier } from './auth/operator-auth.js';
+ import { sendProblem } from './http/problem.js';
+@@ -17,6 +18,8 @@ export interface AppDependencies {
+   readonly orders: OrdersApi;
+   readonly dispatch: DispatchApi;
+   readonly corsOrigins: readonly string[];
++  /** Requests per minute and client address; the probes are exempt. */
++  readonly rateLimitPerMinute?: number;
+ }
+ 
+ /** Builds the gateway: security headers, CORS for the console, operator routes and health probes. */
+@@ -32,6 +35,11 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
+     hsts: { maxAge: 31_536_000, includeSubDomains: true },
+   });
+   await app.register(cors, { origin: [...dependencies.corsOrigins], credentials: true });
++  await app.register(rateLimit, {
++    max: dependencies.rateLimitPerMinute ?? 300,
++    timeWindow: '1 minute',
++    allowList: (request) => request.url === '/healthz' || request.url === '/readyz',
++  });
+ 
+   app.setErrorHandler((error: FastifyError, request, reply) => {
+     if (error instanceof UpstreamError) {
+@@ -44,6 +52,9 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
+     if (error.validation) {
+       return sendProblem(reply, 400, error.message);
+     }
++    if (error.statusCode !== undefined && error.statusCode < 500) {
++      return sendProblem(reply, error.statusCode, error.message);
++    }
+     request.log.error({ err: error }, 'unhandled error');
+     return sendProblem(reply, 500, 'Something went wrong on our side.');
+   });
+diff --git a/src/http/problem.ts b/src/http/problem.ts
+index 75c3ebb..6cdc840 100644
+--- a/src/http/problem.ts
++++ b/src/http/problem.ts
+@@ -18,6 +18,8 @@ function titleFor(status: number): string {
+       return 'Forbidden';
+     case 404:
+       return 'Not Found';
++    case 429:
++      return 'Too Many Requests';
+     case 502:
+       return 'Bad Gateway';
+     case 504:
+diff --git a/tests/integration/platform.test.ts b/tests/integration/platform.test.ts
+index fb033c3..7000d66 100644
+--- a/tests/integration/platform.test.ts
++++ b/tests/integration/platform.test.ts
+@@ -35,6 +35,19 @@ describe('platform', () => {
+     expect(response.headers['access-control-allow-credentials']).toBe('true');
+   });
+ 
++  it('limits the requests of one client address, but not the probes', async () => {
++    const limited = await createTestApp({ rateLimitPerMinute: 2 });
++    const statuses: number[] = [];
++    for (let i = 0; i < 3; i++) {
++      statuses.push((await limited.app.inject({ method: 'GET', url: '/api/orders' })).statusCode);
++    }
++    const probe = await limited.app.inject({ method: 'GET', url: '/healthz' });
++    await limited.app.close();
++
++    expect(statuses).toEqual([401, 401, 429]);
++    expect(probe.statusCode).toBe(200);
++  });
++
+   it('answers an unexpected failure with a generic problem', async () => {
+     const fresh = await createTestApp();
+     fresh.app.get('/boom', () => {
+diff --git a/tests/support/test-app.ts b/tests/support/test-app.ts
+index ba5db56..58f3bb2 100644
+--- a/tests/support/test-app.ts
++++ b/tests/support/test-app.ts
+@@ -16,7 +16,9 @@ export interface TestApp {
+   bearer(scopes: readonly string[], subject?: string): Promise<{ authorization: string }>;
+ }
+ 
+-export async function createTestApp(): Promise<TestApp> {
++export async function createTestApp(
++  options: { rateLimitPerMinute?: number } = {},
++): Promise<TestApp> {
+   const tokens = await createOperatorTokens();
+   const orders = new FakeUpstream();
+   const dispatch = new FakeUpstream();
+@@ -36,6 +38,7 @@ export async function createTestApp(): Promise<TestApp> {
+     orders: createOrdersApi(client('orders', 'http://orders.test', orders)),
+     dispatch: createDispatchApi(client('dispatch', 'http://dispatch.test', dispatch)),
+     corsOrigins: ['https://ops.test'],
++    ...options,
+   });
+   return {
+     app,

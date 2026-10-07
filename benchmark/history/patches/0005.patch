@@ -1,0 +1,399 @@
+From 8fdaa04f26ffcfdf087bd53e9a71286d92d6ae6e Mon Sep 17 00:00:00 2001
+From: Ines Halvard <ines.halvard@example.invalid>
+Date: Fri, 31 Jul 2026 11:36:54 +0200
+Subject: feat(upstream): service token and the order service client
+
+---
+ src/upstream/orders-api.ts         |  35 +++++++++
+ src/upstream/service-token.ts      |  62 ++++++++++++++++
+ src/upstream/upstream-client.ts    | 109 +++++++++++++++++++++++++++++
+ tests/support/fake-upstream.ts     |  49 +++++++++++++
+ tests/unit/service-token.test.ts   |  44 ++++++++++++
+ tests/unit/upstream-client.test.ts |  44 ++++++++++++
+ 6 files changed, 343 insertions(+)
+ create mode 100644 src/upstream/orders-api.ts
+ create mode 100644 src/upstream/service-token.ts
+ create mode 100644 src/upstream/upstream-client.ts
+ create mode 100644 tests/support/fake-upstream.ts
+ create mode 100644 tests/unit/service-token.test.ts
+ create mode 100644 tests/unit/upstream-client.test.ts
+
+diff --git a/src/upstream/orders-api.ts b/src/upstream/orders-api.ts
+new file mode 100644
+index 0000000..b326f29
+--- /dev/null
++++ b/src/upstream/orders-api.ts
+@@ -0,0 +1,35 @@
++import type { UpstreamClient, UpstreamResponse } from './upstream-client.js';
++
++export interface OrderListQuery {
++  readonly page: number;
++  readonly pageSize: number;
++}
++
++/** The order service's HTTP API (estate-quellbrook-orders, contracts/openapi.yaml). */
++export interface OrdersApi {
++  list(operatorId: string, query: OrderListQuery): Promise<UpstreamResponse>;
++  get(operatorId: string, orderId: string): Promise<UpstreamResponse>;
++  place(operatorId: string, order: unknown): Promise<UpstreamResponse>;
++}
++
++export function createOrdersApi(client: UpstreamClient): OrdersApi {
++  return {
++    list(operatorId, query) {
++      const params = new URLSearchParams({
++        page: String(query.page),
++        pageSize: String(query.pageSize),
++      });
++      return client.send({ method: 'GET', path: `/orders?${params.toString()}`, operatorId });
++    },
++    get(operatorId, orderId) {
++      return client.send({
++        method: 'GET',
++        path: `/orders/${encodeURIComponent(orderId)}`,
++        operatorId,
++      });
++    },
++    place(operatorId, order) {
++      return client.send({ method: 'POST', path: '/orders', operatorId, body: order });
++    },
++  };
++}
+diff --git a/src/upstream/service-token.ts b/src/upstream/service-token.ts
+new file mode 100644
+index 0000000..5443144
+--- /dev/null
++++ b/src/upstream/service-token.ts
+@@ -0,0 +1,62 @@
++/** Obtains and caches the gateway's own access token for the downstream services (OAuth 2.0 client credentials). */
++export interface ServiceTokenSource {
++  token(): Promise<string>;
++}
++
++export interface ServiceIdentity {
++  readonly tokenUrl: string;
++  readonly clientId: string;
++  readonly clientSecret: string;
++}
++
++const refreshMarginMs = 60_000;
++const scopes = 'orders:read orders:write dispatch:read dispatch:write';
++
++export function createServiceTokenSource(
++  identity: ServiceIdentity,
++  fetchImpl: typeof fetch,
++  now: () => number = Date.now,
++): ServiceTokenSource {
++  let cached: { value: string; expiresAt: number } | undefined;
++  let pending: Promise<string> | undefined;
++
++  async function fetchToken(): Promise<string> {
++    const response = await fetchImpl(identity.tokenUrl, {
++      method: 'POST',
++      headers: { 'content-type': 'application/x-www-form-urlencoded' },
++      body: new URLSearchParams({
++        grant_type: 'client_credentials',
++        client_id: identity.clientId,
++        client_secret: identity.clientSecret,
++        scope: scopes,
++      }),
++      signal: AbortSignal.timeout(5_000),
++    });
++    if (!response.ok) {
++      throw new Error(
++        `The identity provider refused the gateway's client credentials (${response.status}).`,
++      );
++    }
++    const body = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
++    if (typeof body.access_token !== 'string' || typeof body.expires_in !== 'number') {
++      throw new Error('The identity provider answered without an access token.');
++    }
++    cached = {
++      value: body.access_token,
++      expiresAt: now() + body.expires_in * 1_000 - refreshMarginMs,
++    };
++    return body.access_token;
++  }
++
++  return {
++    async token() {
++      if (cached && cached.expiresAt > now()) {
++        return cached.value;
++      }
++      pending ??= fetchToken().finally(() => {
++        pending = undefined;
++      });
++      return pending;
++    },
++  };
++}
+diff --git a/src/upstream/upstream-client.ts b/src/upstream/upstream-client.ts
+new file mode 100644
+index 0000000..e97ea68
+--- /dev/null
++++ b/src/upstream/upstream-client.ts
+@@ -0,0 +1,109 @@
++import type { BaseLogger } from 'pino';
++import type { ServiceTokenSource } from './service-token.js';
++
++export interface UpstreamRequest {
++  readonly method: 'GET' | 'POST';
++  readonly path: string;
++  /** The operator on whose behalf the gateway calls; the services record it on what the operator changes. */
++  readonly operatorId: string;
++  readonly body?: unknown;
++  readonly headers?: Readonly<Record<string, string>>;
++}
++
++export interface UpstreamResponse {
++  readonly status: number;
++  readonly body: unknown;
++  readonly contentType?: string;
++  readonly location?: string;
++}
++
++export type UpstreamFailure = 'timeout' | 'unavailable' | 'error';
++
++/** The upstream did not answer usefully: it timed out, could not be reached, or failed with a 5xx. */
++export class UpstreamError extends Error {
++  constructor(
++    readonly upstream: string,
++    readonly failure: UpstreamFailure,
++    readonly status?: number,
++  ) {
++    super(`${upstream} ${failure}${status === undefined ? '' : ` (${status})`}`);
++    this.name = 'UpstreamError';
++  }
++}
++
++export interface UpstreamClient {
++  send(request: UpstreamRequest): Promise<UpstreamResponse>;
++}
++
++export interface UpstreamClientOptions {
++  readonly name: string;
++  readonly baseUrl: string;
++  readonly timeoutMs: number;
++  readonly tokens: ServiceTokenSource;
++  readonly fetch: typeof fetch;
++  readonly logger: BaseLogger;
++}
++
++/**
++ * Calls one downstream service with the gateway's service token. Answers below 500 are relayed to the caller as they
++ * are (a 404 or a validation problem is the service's answer); timeouts, unreachable services and 5xx answers become
++ * an {@link UpstreamError}.
++ */
++export function createUpstreamClient(options: UpstreamClientOptions): UpstreamClient {
++  return {
++    async send(request) {
++      const url = new URL(request.path, options.baseUrl);
++      const headers: Record<string, string> = {
++        accept: 'application/json',
++        authorization: `Bearer ${await options.tokens.token()}`,
++        'x-quellbrook-operator': request.operatorId,
++        ...request.headers,
++      };
++      if (request.body !== undefined) {
++        headers['content-type'] = 'application/json';
++      }
++      let response: Response;
++      try {
++        response = await options.fetch(url, {
++          method: request.method,
++          headers,
++          body: request.body === undefined ? null : JSON.stringify(request.body),
++          signal: AbortSignal.timeout(options.timeoutMs),
++        });
++      } catch (error) {
++        const failure: UpstreamFailure =
++          error instanceof DOMException && error.name === 'TimeoutError'
++            ? 'timeout'
++            : 'unavailable';
++        options.logger.warn(
++          { upstream: options.name, method: request.method, path: url.pathname, failure },
++          'upstream call failed',
++        );
++        throw new UpstreamError(options.name, failure);
++      }
++      if (response.status >= 500) {
++        options.logger.warn(
++          {
++            upstream: options.name,
++            method: request.method,
++            path: url.pathname,
++            status: response.status,
++          },
++          'upstream call failed',
++        );
++        throw new UpstreamError(options.name, 'error', response.status);
++      }
++      const text = await response.text();
++      return {
++        status: response.status,
++        body: text.length === 0 ? undefined : (JSON.parse(text) as unknown),
++        ...optional('contentType', response.headers.get('content-type')),
++        ...optional('location', response.headers.get('location')),
++      };
++    },
++  };
++}
++
++function optional<K extends string>(key: K, value: string | null): Partial<Record<K, string>> {
++  return value === null ? {} : ({ [key]: value } as Record<K, string>);
++}
+diff --git a/tests/support/fake-upstream.ts b/tests/support/fake-upstream.ts
+new file mode 100644
+index 0000000..8709721
+--- /dev/null
++++ b/tests/support/fake-upstream.ts
+@@ -0,0 +1,49 @@
++export interface RecordedCall {
++  readonly url: string;
++  readonly method: string;
++  readonly headers: Record<string, string>;
++  readonly body: unknown;
++}
++
++type Answer = Response | Error | ((call: RecordedCall) => Response | Error);
++
++/** A fetch implementation that records calls and answers from a queue (or a fixed answer), with no network. */
++export class FakeUpstream {
++  readonly calls: RecordedCall[] = [];
++  private readonly answers: Answer[] = [];
++  private fallback: Answer = json(200, {});
++
++  readonly fetch: typeof fetch = (input, init) => {
++    const headers = Object.fromEntries(new Headers(init?.headers).entries());
++    const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : init?.body;
++    const url = input instanceof Request ? input.url : input.toString();
++    const call: RecordedCall = { url, method: init?.method ?? 'GET', headers, body };
++    this.calls.push(call);
++    const answer = this.answers.shift() ?? this.fallback;
++    const result = typeof answer === 'function' ? answer(call) : answer;
++    return result instanceof Error ? Promise.reject(result) : Promise.resolve(result.clone());
++  };
++
++  answer(...answers: Answer[]): this {
++    this.answers.push(...answers);
++    return this;
++  }
++
++  always(answer: Answer): this {
++    this.fallback = answer;
++    return this;
++  }
++}
++
++export function json(
++  status: number,
++  body: unknown,
++  headers: Record<string, string> = {},
++): Response {
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: { 'content-type': 'application/json', ...headers },
++  });
++}
++
++export const fixedToken = { token: () => Promise.resolve('service-token-for-tests') };
+diff --git a/tests/unit/service-token.test.ts b/tests/unit/service-token.test.ts
+new file mode 100644
+index 0000000..4f72130
+--- /dev/null
++++ b/tests/unit/service-token.test.ts
+@@ -0,0 +1,44 @@
++import { describe, expect, it } from 'vitest';
++import { createServiceTokenSource } from '../../src/upstream/service-token.js';
++import { FakeUpstream, json } from '../support/fake-upstream.js';
++
++const identity = {
++  tokenUrl: 'https://id.test/token',
++  clientId: 'quellbrook-gateway',
++  clientSecret: 'unit-test-client-secret',
++};
++
++describe('service token', () => {
++  it('asks for client credentials once and reuses the token until shortly before it expires', async () => {
++    const idp = new FakeUpstream().answer(
++      json(200, { access_token: 'first', expires_in: 300 }),
++      json(200, { access_token: 'second', expires_in: 300 }),
++    );
++    let now = 0;
++    const source = createServiceTokenSource(identity, idp.fetch, () => now);
++
++    const first = await source.token();
++    now = 200_000;
++    const reused = await source.token();
++    now = 241_000;
++    const renewed = await source.token();
++
++    expect([first, reused, renewed]).toEqual(['first', 'first', 'second']);
++    expect(idp.calls).toHaveLength(2);
++    expect(String(idp.calls[0]?.body)).toContain('grant_type=client_credentials');
++  });
++
++  it('fails when the identity provider refuses or answers without a token', async () => {
++    const refusing = createServiceTokenSource(
++      identity,
++      new FakeUpstream().always(json(401, {})).fetch,
++    );
++    const empty = createServiceTokenSource(
++      identity,
++      new FakeUpstream().always(json(200, {})).fetch,
++    );
++
++    await expect(refusing.token()).rejects.toThrow(/401/);
++    await expect(empty.token()).rejects.toThrow(/without an access token/);
++  });
++});
+diff --git a/tests/unit/upstream-client.test.ts b/tests/unit/upstream-client.test.ts
+new file mode 100644
+index 0000000..c7b1706
+--- /dev/null
++++ b/tests/unit/upstream-client.test.ts
+@@ -0,0 +1,44 @@
++import { pino } from 'pino';
++import { describe, expect, it } from 'vitest';
++import { createUpstreamClient, UpstreamError } from '../../src/upstream/upstream-client.js';
++import { FakeUpstream, fixedToken } from '../support/fake-upstream.js';
++
++const client = (upstream: FakeUpstream) =>
++  createUpstreamClient({
++    name: 'orders',
++    baseUrl: 'http://orders.test',
++    timeoutMs: 1_000,
++    tokens: fixedToken,
++    fetch: upstream.fetch,
++    logger: pino({ level: 'silent' }),
++  });
++
++describe('upstream client', () => {
++  it('reports an unreachable service as unavailable', async () => {
++    const upstream = new FakeUpstream().answer(new TypeError('fetch failed'));
++
++    await expect(
++      client(upstream).send({ method: 'GET', path: '/orders', operatorId: 'operator-4' }),
++    ).rejects.toMatchObject({
++      failure: 'unavailable',
++    });
++  });
++
++  it('sends JSON bodies and returns an empty body as undefined', async () => {
++    const upstream = new FakeUpstream().answer(new Response(null, { status: 204 }));
++
++    const response = await client(upstream).send({
++      method: 'POST',
++      path: '/orders/1/cancellation',
++      operatorId: 'operator-4',
++      body: { reason: 'x' },
++    });
++
++    expect(response).toEqual({ status: 204, body: undefined });
++    expect(upstream.calls[0]?.headers['content-type']).toBe('application/json');
++  });
++
++  it('names the upstream and the status in its errors', () => {
++    expect(new UpstreamError('dispatch', 'error', 503).message).toBe('dispatch error (503)');
++  });
++});

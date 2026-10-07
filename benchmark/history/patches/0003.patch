@@ -1,0 +1,203 @@
+From 68a1d140406816efe11f01fd80152dcc012f3d13 Mon Sep 17 00:00:00 2001
+From: Teodor Vasko <teodor.vasko@example.invalid>
+Date: Wed, 29 Jul 2026 10:02:48 +0200
+Subject: feat: configuration, logging and problem details
+
+---
+ src/config.ts             | 82 +++++++++++++++++++++++++++++++++++++++
+ src/http/problem.ts       | 28 +++++++++++++
+ src/logger.ts             | 14 +++++++
+ tests/unit/config.test.ts | 39 +++++++++++++++++++
+ 4 files changed, 163 insertions(+)
+ create mode 100644 src/config.ts
+ create mode 100644 src/http/problem.ts
+ create mode 100644 src/logger.ts
+ create mode 100644 tests/unit/config.test.ts
+
+diff --git a/src/config.ts b/src/config.ts
+new file mode 100644
+index 0000000..b9766b0
+--- /dev/null
++++ b/src/config.ts
+@@ -0,0 +1,82 @@
++import { z } from 'zod';
++
++const logLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
++
++const environmentSchema = z.object({
++  HOST: z.string().min(1).default('0.0.0.0'),
++  PORT: z.coerce.number().int().min(0).max(65_535).default(8080),
++  LOG_LEVEL: z.enum(logLevels).default('info'),
++  OIDC_ISSUER: z.url({ protocol: /^https$/ }),
++  OIDC_AUDIENCE: z.string().min(1).default('quellbrook-console'),
++  OIDC_JWKS_URL: z.url({ protocol: /^https$/ }),
++  TOKEN_URL: z.url({ protocol: /^https$/ }),
++  GATEWAY_CLIENT_ID: z.string().min(1).default('quellbrook-gateway'),
++  GATEWAY_CLIENT_SECRET: z.string().min(1),
++  ORDERS_API_URL: z.url(),
++  DISPATCH_API_URL: z.url(),
++  UPSTREAM_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
++  CORS_ORIGINS: z.string().min(1).default('https://ops.quellbrook.example'),
++});
++
++export type LogLevel = (typeof logLevels)[number];
++
++export interface GatewayConfig {
++  readonly host: string;
++  readonly port: number;
++  readonly logLevel: LogLevel;
++  readonly operatorTokens: {
++    readonly issuer: string;
++    readonly audience: string;
++    readonly jwksUrl: string;
++  };
++  readonly serviceIdentity: {
++    readonly tokenUrl: string;
++    readonly clientId: string;
++    readonly clientSecret: string;
++  };
++  readonly upstreams: {
++    readonly orders: string;
++    readonly dispatch: string;
++    readonly timeoutMs: number;
++  };
++  readonly corsOrigins: readonly string[];
++}
++
++export class ConfigurationError extends Error {
++  constructor(readonly problems: readonly string[]) {
++    super(`Invalid configuration: ${problems.join('; ')}`);
++    this.name = 'ConfigurationError';
++  }
++}
++
++/** Reads and validates the gateway's configuration from the environment. Values are never echoed in errors. */
++export function loadConfig(environment: NodeJS.ProcessEnv): GatewayConfig {
++  const parsed = environmentSchema.safeParse(environment);
++  if (!parsed.success) {
++    throw new ConfigurationError(
++      parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
++    );
++  }
++  const env = parsed.data;
++  return {
++    host: env.HOST,
++    port: env.PORT,
++    logLevel: env.LOG_LEVEL,
++    operatorTokens: {
++      issuer: env.OIDC_ISSUER,
++      audience: env.OIDC_AUDIENCE,
++      jwksUrl: env.OIDC_JWKS_URL,
++    },
++    serviceIdentity: {
++      tokenUrl: env.TOKEN_URL,
++      clientId: env.GATEWAY_CLIENT_ID,
++      clientSecret: env.GATEWAY_CLIENT_SECRET,
++    },
++    upstreams: {
++      orders: env.ORDERS_API_URL,
++      dispatch: env.DISPATCH_API_URL,
++      timeoutMs: env.UPSTREAM_TIMEOUT_MS,
++    },
++    corsOrigins: env.CORS_ORIGINS.split(',').map((origin) => origin.trim()),
++  };
++}
+diff --git a/src/http/problem.ts b/src/http/problem.ts
+new file mode 100644
+index 0000000..75c3ebb
+--- /dev/null
++++ b/src/http/problem.ts
+@@ -0,0 +1,28 @@
++import type { FastifyReply } from 'fastify';
++
++/** Sends an RFC 9457 problem details response. */
++export function sendProblem(reply: FastifyReply, status: number, detail: string): FastifyReply {
++  return reply
++    .code(status)
++    .type('application/problem+json')
++    .send({ type: 'about:blank', title: titleFor(status), status, detail });
++}
++
++function titleFor(status: number): string {
++  switch (status) {
++    case 400:
++      return 'Bad Request';
++    case 401:
++      return 'Unauthorized';
++    case 403:
++      return 'Forbidden';
++    case 404:
++      return 'Not Found';
++    case 502:
++      return 'Bad Gateway';
++    case 504:
++      return 'Gateway Timeout';
++    default:
++      return 'Error';
++  }
++}
+diff --git a/src/logger.ts b/src/logger.ts
+new file mode 100644
+index 0000000..e3e92dd
+--- /dev/null
++++ b/src/logger.ts
+@@ -0,0 +1,14 @@
++import type { LoggerOptions } from 'pino';
++import type { LogLevel } from './config.js';
++
++/**
++ * Structured JSON logs for Fastify's pino logger. Credentials in the incoming request's headers are redacted before
++ * a line is written.
++ */
++export function loggerOptions(level: LogLevel): LoggerOptions {
++  return {
++    level,
++    base: { service: 'quellbrook-gateway' },
++    redact: ['req.headers.authorization', 'req.headers.cookie'],
++  };
++}
+diff --git a/tests/unit/config.test.ts b/tests/unit/config.test.ts
+new file mode 100644
+index 0000000..a039a22
+--- /dev/null
++++ b/tests/unit/config.test.ts
+@@ -0,0 +1,39 @@
++import { describe, expect, it } from 'vitest';
++import { ConfigurationError, loadConfig } from '../../src/config.js';
++
++const complete = {
++  OIDC_ISSUER: 'https://id.quellbrook.example/realms/operations',
++  OIDC_JWKS_URL: 'https://id.quellbrook.example/realms/operations/protocol/openid-connect/certs',
++  TOKEN_URL: 'https://id.quellbrook.example/realms/operations/protocol/openid-connect/token',
++  GATEWAY_CLIENT_SECRET: 'from-the-environment',
++  ORDERS_API_URL: 'http://quellbrook-orders.quellbrook-orders.svc.cluster.local',
++  DISPATCH_API_URL: 'http://quellbrook-dispatch.quellbrook-dispatch.svc.cluster.local',
++};
++
++describe('configuration', () => {
++  it('reads a complete environment with defaults for the rest', () => {
++    const config = loadConfig({
++      ...complete,
++      CORS_ORIGINS: 'https://a.example, https://b.example',
++    });
++
++    expect(config.port).toBe(8080);
++    expect(config.operatorTokens.audience).toBe('quellbrook-console');
++    expect(config.upstreams.timeoutMs).toBe(5_000);
++    expect(config.corsOrigins).toEqual(['https://a.example', 'https://b.example']);
++  });
++
++  it('refuses an issuer that is not https and names the problem without the value', () => {
++    const attempt = () => loadConfig({ ...complete, OIDC_ISSUER: 'http://id.example' });
++
++    expect(attempt).toThrow(ConfigurationError);
++    expect(attempt).toThrow(/OIDC_ISSUER/);
++  });
++
++  it('refuses to start without the client secret', () => {
++    const withoutSecret: Partial<typeof complete> = { ...complete };
++    delete withoutSecret.GATEWAY_CLIENT_SECRET;
++
++    expect(() => loadConfig(withoutSecret)).toThrow(/GATEWAY_CLIENT_SECRET/);
++  });
++});

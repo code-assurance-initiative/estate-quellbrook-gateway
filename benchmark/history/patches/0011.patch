@@ -1,0 +1,64 @@
+From 66108340a6681bec07f881efdca96fc99e08bb2e Mon Sep 17 00:00:00 2001
+From: Ines Halvard <ines.halvard@example.invalid>
+Date: Tue, 11 Aug 2026 10:55:39 +0200
+Subject: feat(upstream): dispatch service client
+
+---
+ src/upstream/dispatch-api.ts | 48 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+ create mode 100644 src/upstream/dispatch-api.ts
+
+diff --git a/src/upstream/dispatch-api.ts b/src/upstream/dispatch-api.ts
+new file mode 100644
+index 0000000..816a73e
+--- /dev/null
++++ b/src/upstream/dispatch-api.ts
+@@ -0,0 +1,48 @@
++import type { UpstreamClient, UpstreamResponse } from './upstream-client.js';
++
++/** The dispatch service's HTTP API (estate-quellbrook-dispatch, contracts/openapi.yaml). */
++export interface DispatchApi {
++  board(operatorId: string, date: string): Promise<UpstreamResponse>;
++  assign(operatorId: string, consignmentId: string, serviceDate: string): Promise<UpstreamResponse>;
++  startRoute(operatorId: string, routeId: string): Promise<UpstreamResponse>;
++  availableDrivers(operatorId: string, date: string, depot: string): Promise<UpstreamResponse>;
++  consignmentForOrder(operatorId: string, orderId: string): Promise<UpstreamResponse>;
++}
++
++export function createDispatchApi(client: UpstreamClient): DispatchApi {
++  return {
++    board(operatorId, date) {
++      return client.send({
++        method: 'GET',
++        path: `/routes?${new URLSearchParams({ date }).toString()}`,
++        operatorId,
++      });
++    },
++    assign(operatorId, consignmentId, serviceDate) {
++      return client.send({
++        method: 'POST',
++        path: `/consignments/${encodeURIComponent(consignmentId)}/assignment`,
++        operatorId,
++        body: { serviceDate },
++      });
++    },
++    startRoute(operatorId, routeId) {
++      return client.send({
++        method: 'POST',
++        path: `/routes/${encodeURIComponent(routeId)}/start`,
++        operatorId,
++      });
++    },
++    availableDrivers(operatorId, date, depot) {
++      const query = new URLSearchParams({ date, depot }).toString();
++      return client.send({ method: 'GET', path: `/drivers/available?${query}`, operatorId });
++    },
++    consignmentForOrder(operatorId, orderId) {
++      return client.send({
++        method: 'GET',
++        path: `/consignments/by-order/${encodeURIComponent(orderId)}`,
++        operatorId,
++      });
++    },
++  };
++}

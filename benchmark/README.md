@@ -50,22 +50,23 @@ The commits are listed in `benchmark/history/README.md`.
 
 | Id | Concept | Site | Why |
 |---|---|---|---|
-| GW-001 | `missing-authorization` | `src/routes/dispatch-routes.ts:60-70` | GET /api/dispatch/drivers/available was added in sprint 2 for the dispatch board without the operator authentication and scope pre-handlers every other /api route has. The gateway calls the dispatch service with its own service credentials, so the route returns the driver roster (names, licence categories, shift times, vehicles) to any caller that can reach the ingress, with or without a session. |
-| GW-002 | `sensitive-data-in-logs` | `src/upstream/upstream-client.ts:80-90` | When an upstream call fails the client logs the outgoing request including its headers. Those headers carry the gateway's own bearer token for the downstream services (Authorization) and the operator id; the logger's redaction list covers only the incoming request's authorization and cookie headers, not this field, so a service token valid for every downstream API reaches the log platform on every upstream error. |
+| GW-001 | `missing-authorization` | `src/routes/dispatch-routes.ts:73-96` | GET /api/dispatch/drivers/available was added in sprint 2 for the dispatch board without the operator authentication and scope pre-handlers every other /api route has. The gateway calls the dispatch service with its own service credentials, so the route returns the driver roster (names, licence categories, shift times, vehicles) to any caller that can reach the ingress, with or without a session. |
+| GW-002 | `sensitive-data-in-logs` | `src/upstream/upstream-client.ts:88-109` | When an upstream call fails (sprint 3, 'log the failed request') the client logs the outgoing request including its headers. Those headers carry the gateway's own bearer token for the downstream services (Authorization) and the operator id; the logger's redaction list covers only the incoming request's authorization and cookie headers, not this field, so a service token valid for every downstream API reaches the log platform on every upstream error. |
 
 ## Traps (`must-not-fire`)
 
 | Id | Concept | Site | Why |
 |---|---|---|---|
-| TRP-001 | `missing-authorization` | `src/routes/health-routes.ts:5-25` | /healthz and /readyz are the kubelet's liveness and readiness probes; they return a status word and no data, and are anonymous by design. |
-| TRP-002 | `sensitive-data-in-logs` | `src/logger.ts:10-16` | The logger configuration names the authorization and cookie headers only to redact them; it is the control, not a leak. |
-| TRP-003 | `hardcoded-credential` | `.env.example:1-20` | .env.example documents every variable with a non-secret local default or an empty value; the client secret line is empty. |
-| TRP-004 | `hardcoded-credential` | `deploy/k8s/deployment.yaml:50-60` | The gateway's client secret is read from a Kubernetes Secret (secretKeyRef) materialised by an ExternalSecret. |
-| TRP-005 | `server-side-request-forgery` | `src/upstream/orders-api.ts:20-30` | The upstream URL is built from a configured base URL and a path whose only caller-supplied part is a route parameter that the route schema restricts to a UUID and that is percent-encoded; the caller cannot choose the host, scheme or port. |
+| TRP-001 | `missing-authorization` | `src/routes/health-routes.ts:5-6` | /healthz and /readyz are the kubelet's liveness and readiness probes; they return a status word and no data, and are anonymous by design. |
+| TRP-002 | `sensitive-data-in-logs` | `src/logger.ts:12` | The logger configuration names the authorization and cookie headers only to redact them; it is the control, not a leak. |
+| TRP-003 | `hardcoded-credential` | `.env.example:1-15` | .env.example documents every variable with a non-secret local default or an empty value; the client secret line is empty. |
+| TRP-004 | `hardcoded-credential` | `deploy/k8s/deployment.yaml:63-67` | The gateway's client secret is read from a Kubernetes Secret (secretKeyRef) materialised by an ExternalSecret. |
+| TRP-006 | `missing-image-healthcheck` | `Dockerfile` | The image runs only on Kubernetes, which ignores a Dockerfile HEALTHCHECK; the probes are in deploy/k8s/deployment.yaml (the Dockerfile says so in its header). |
+| TRP-005 | `server-side-request-forgery` | `src/upstream/orders-api.ts:29` | The upstream URL is built from a configured base URL and a path whose only caller-supplied part is a route parameter that the route schema restricts to a UUID and that is percent-encoded; the caller cannot choose the host, scheme or port. |
 
 ## Certified clean
 
-Every tracked file will carry a `clean` entry, generated from the file list once the code exists: files without a label clean for every concept, labelled files for every finding concept except the labelled ones.
+91 `clean` entries, one per tracked file: files without a label are certified clean for every concept (`"*"`); a file that carries a plant or a trap is certified clean for every finding concept except the labelled ones and the concepts a result of those labels would restate.
 
 ## Not applicable
 

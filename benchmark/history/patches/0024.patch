@@ -1,0 +1,63 @@
+From f5fb1750e1459984058fd89829a3850edbb96047 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Fri, 4 Sep 2026 14:52:16 +0200
+Subject: release 0.3.0
+
+---
+ CHANGELOG.md      | 10 ++++++++++
+ package-lock.json |  4 ++--
+ package.json      |  2 +-
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c657d6c..ae191d6 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,16 @@
+ All notable changes to this project are documented here. The format follows
+ [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
+ 
++## [0.3.0] - 2026-09-04
++
++### Added
++
++- Reads are retried with backoff when an upstream is briefly unavailable.
++- Rate limiting per client address (probes exempt).
++- The console's `Idempotency-Key` is forwarded when an order is placed.
++- More context in the log when an upstream call fails.
++- Release images carry a signed build-provenance attestation, verified before deploying.
++
+ ## [0.2.0] - 2026-08-21
+ 
+ ### Added
+diff --git a/package-lock.json b/package-lock.json
+index 9450e35..6480c2f 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "quellbrook-gateway",
+-  "version": "0.2.0",
++  "version": "0.3.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "quellbrook-gateway",
+-      "version": "0.2.0",
++      "version": "0.3.0",
+       "license": "MIT",
+       "dependencies": {
+         "@fastify/cors": "^11.3.0",
+diff --git a/package.json b/package.json
+index b8ea90a..65c58f6 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "quellbrook-gateway",
+-  "version": "0.2.0",
++  "version": "0.3.0",
+   "description": "API gateway and backend-for-frontend of the Quellbrook operations platform.",
+   "private": true,
+   "license": "MIT",

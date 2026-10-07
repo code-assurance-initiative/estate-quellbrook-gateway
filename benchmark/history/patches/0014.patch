@@ -1,0 +1,69 @@
+From c7553473e97a85db45bf46169c8afdcd651605fe Mon Sep 17 00:00:00 2001
+From: Teodor Vasko <teodor.vasko@example.invalid>
+Date: Fri, 14 Aug 2026 11:20:05 +0200
+Subject: feat: drivers and vehicles available, for the board's route planner
+
+---
+ src/routes/dispatch-routes.ts             | 24 +++++++++++++++++++++++
+ tests/integration/dispatch-routes.test.ts | 15 ++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/src/routes/dispatch-routes.ts b/src/routes/dispatch-routes.ts
+index 494df58..49289aa 100644
+--- a/src/routes/dispatch-routes.ts
++++ b/src/routes/dispatch-routes.ts
+@@ -69,4 +69,28 @@ export function dispatchRoutes(
+         await dependencies.dispatch.startRoute(operatorOf(request), request.params.routeId),
+       ),
+   );
++
++  app.get<{ Querystring: { date: string; depot: string } }>(
++    '/api/dispatch/drivers/available',
++    {
++      schema: {
++        querystring: {
++          type: 'object',
++          required: ['date', 'depot'],
++          properties: { date, depot: { type: 'string', pattern: '^[A-Z]{3}$' } },
++        },
++      },
++    },
++    async (request, reply) => {
++      const operatorId = request.operator?.id ?? 'anonymous';
++      return relay(
++        reply,
++        await dependencies.dispatch.availableDrivers(
++          operatorId,
++          request.query.date,
++          request.query.depot,
++        ),
++      );
++    },
++  );
+ }
+diff --git a/tests/integration/dispatch-routes.test.ts b/tests/integration/dispatch-routes.test.ts
+index 42bf80f..dcf4758 100644
+--- a/tests/integration/dispatch-routes.test.ts
++++ b/tests/integration/dispatch-routes.test.ts
+@@ -49,6 +49,21 @@ describe('dispatch routes', () => {
+     expect(test.dispatch.calls.at(-1)?.headers['x-quellbrook-operator']).toBe('dispatcher-2');
+   });
+ 
++  it('lists the drivers available for the route planner', async () => {
++    test.dispatch.answer(json(200, { drivers: [], vehicles: [] }));
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: '/api/dispatch/drivers/available?date=2026-08-12&depot=AAR',
++      headers: await test.bearer(['dispatch:read']),
++    });
++
++    expect(response.statusCode).toBe(200);
++    expect(test.dispatch.calls.at(-1)?.url).toBe(
++      'http://dispatch.test/drivers/available?date=2026-08-12&depot=AAR',
++    );
++  });
++
+   it('refuses writes without the write scope and malformed dates', async () => {
+     const reader = await test.bearer(['dispatch:read']);
+ 

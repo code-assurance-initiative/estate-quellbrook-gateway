@@ -1,0 +1,160 @@
+From e8eea9712b868ffb482b91d7adca7fb9a7a0edde Mon Sep 17 00:00:00 2001
+From: Ines Halvard <ines.halvard@example.invalid>
+Date: Tue, 18 Aug 2026 15:47:22 +0200
+Subject: feat: shipment view joining an order with its delivery
+
+---
+ src/app.ts                                |  2 +
+ src/routes/shipment-routes.ts             | 52 +++++++++++++++++++
+ tests/integration/dispatch-routes.test.ts | 63 +++++++++++++++++++++++
+ 3 files changed, 117 insertions(+)
+ create mode 100644 src/routes/shipment-routes.ts
+
+diff --git a/src/app.ts b/src/app.ts
+index 0435e0d..95bf25c 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -6,6 +6,7 @@ import { sendProblem } from './http/problem.js';
+ import { dispatchRoutes } from './routes/dispatch-routes.js';
+ import { healthRoutes } from './routes/health-routes.js';
+ import { ordersRoutes } from './routes/orders-routes.js';
++import { shipmentRoutes } from './routes/shipment-routes.js';
+ import type { DispatchApi } from './upstream/dispatch-api.js';
+ import type { OrdersApi } from './upstream/orders-api.js';
+ import { UpstreamError } from './upstream/upstream-client.js';
+@@ -50,5 +51,6 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
+   healthRoutes(app);
+   ordersRoutes(app, dependencies);
+   dispatchRoutes(app, dependencies);
++  shipmentRoutes(app, dependencies);
+   return app;
+ }
+diff --git a/src/routes/shipment-routes.ts b/src/routes/shipment-routes.ts
+new file mode 100644
+index 0000000..7665c9f
+--- /dev/null
++++ b/src/routes/shipment-routes.ts
+@@ -0,0 +1,52 @@
++import type { FastifyInstance } from 'fastify';
++import { authenticate, requireScope, type OperatorVerifier } from '../auth/operator-auth.js';
++import type { DispatchApi } from '../upstream/dispatch-api.js';
++import type { OrdersApi } from '../upstream/orders-api.js';
++import { operatorOf, relay } from './orders-routes.js';
++
++export interface ShipmentRouteDependencies {
++  readonly verifier: OperatorVerifier;
++  readonly orders: OrdersApi;
++  readonly dispatch: DispatchApi;
++}
++
++/**
++ * The shipment view of the console's order page: the order from the order service and, once dispatch has it, the
++ * delivery's progress. A consignment that does not exist yet is not an error: `delivery` is null.
++ */
++export function shipmentRoutes(
++  app: FastifyInstance,
++  dependencies: ShipmentRouteDependencies,
++): void {
++  app.get<{ Params: { orderId: string } }>(
++    '/api/shipments/:orderId',
++    {
++      preHandler: [
++        authenticate(dependencies.verifier),
++        requireScope('orders:read'),
++        requireScope('dispatch:read'),
++      ],
++      schema: {
++        params: {
++          type: 'object',
++          required: ['orderId'],
++          properties: { orderId: { type: 'string', format: 'uuid' } },
++        },
++      },
++    },
++    async (request, reply) => {
++      const operatorId = operatorOf(request);
++      const [order, consignment] = await Promise.all([
++        dependencies.orders.get(operatorId, request.params.orderId),
++        dependencies.dispatch.consignmentForOrder(operatorId, request.params.orderId),
++      ]);
++      if (order.status !== 200) {
++        return relay(reply, order);
++      }
++      return reply.send({
++        order: order.body,
++        delivery: consignment.status === 200 ? consignment.body : null,
++      });
++    },
++  );
++}
+diff --git a/tests/integration/dispatch-routes.test.ts b/tests/integration/dispatch-routes.test.ts
+index dcf4758..4c67c41 100644
+--- a/tests/integration/dispatch-routes.test.ts
++++ b/tests/integration/dispatch-routes.test.ts
+@@ -82,3 +82,66 @@ describe('dispatch routes', () => {
+     expect(board.statusCode).toBe(400);
+   });
+ });
++
++describe('shipment view', () => {
++  let test: TestApp;
++  const orderId = '0198f1a2-0000-7000-8000-000000000001';
++  beforeAll(async () => {
++    test = await createTestApp();
++  });
++  afterAll(async () => {
++    await test.app.close();
++  });
++
++  it('joins the order with its delivery', async () => {
++    test.orders.answer(json(200, { id: orderId, status: 'placed' }));
++    test.dispatch.answer(json(200, { orderId, status: 'OutForDelivery' }));
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: `/api/shipments/${orderId}`,
++      headers: await test.bearer(['orders:read', 'dispatch:read']),
++    });
++
++    expect(response.json()).toEqual({
++      order: { id: orderId, status: 'placed' },
++      delivery: { orderId, status: 'OutForDelivery' },
++    });
++  });
++
++  it('shows no delivery while dispatch has not received the order', async () => {
++    test.orders.answer(json(200, { id: orderId }));
++    test.dispatch.answer(json(404, {}));
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: `/api/shipments/${orderId}`,
++      headers: await test.bearer(['orders:read', 'dispatch:read']),
++    });
++
++    expect(response.json<{ delivery: unknown }>().delivery).toBeNull();
++  });
++
++  it('is not found when the order is not', async () => {
++    test.orders.answer(json(404, { status: 404 }));
++    test.dispatch.answer(json(404, {}));
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: `/api/shipments/${orderId}`,
++      headers: await test.bearer(['orders:read', 'dispatch:read']),
++    });
++
++    expect(response.statusCode).toBe(404);
++  });
++
++  it('needs both read scopes', async () => {
++    const response = await test.app.inject({
++      method: 'GET',
++      url: `/api/shipments/${orderId}`,
++      headers: await test.bearer(['orders:read']),
++    });
++
++    expect(response.statusCode).toBe(403);
++  });
++});

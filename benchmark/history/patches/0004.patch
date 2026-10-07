@@ -1,0 +1,186 @@
+From ac4129eebadde3b800ce814fe8a493bb84723332 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Thu, 30 Jul 2026 15:21:10 +0200
+Subject: feat(auth): verify operator tokens and check scopes
+
+---
+ src/auth/operator-auth.ts        | 92 ++++++++++++++++++++++++++++++++
+ tests/support/operator-tokens.ts | 31 +++++++++++
+ tests/unit/operator-auth.test.ts | 31 +++++++++++
+ 3 files changed, 154 insertions(+)
+ create mode 100644 src/auth/operator-auth.ts
+ create mode 100644 tests/support/operator-tokens.ts
+ create mode 100644 tests/unit/operator-auth.test.ts
+
+diff --git a/src/auth/operator-auth.ts b/src/auth/operator-auth.ts
+new file mode 100644
+index 0000000..373ecaa
+--- /dev/null
++++ b/src/auth/operator-auth.ts
+@@ -0,0 +1,92 @@
++import type { FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
++import { createRemoteJWKSet, errors, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
++import { sendProblem } from '../http/problem.js';
++
++export interface Operator {
++  readonly id: string;
++  readonly scopes: ReadonlySet<string>;
++}
++
++declare module 'fastify' {
++  interface FastifyRequest {
++    operator?: Operator;
++  }
++}
++
++export interface OperatorVerifier {
++  /** The operator, or undefined when the token is malformed, forged, expired or meant for someone else. */
++  verify(token: string): Promise<Operator | undefined>;
++}
++
++export interface OperatorTokenSettings {
++  readonly issuer: string;
++  readonly audience: string;
++}
++
++/**
++ * Operators sign in at the identity provider through the ingress's authentication proxy, which forwards their access
++ * token. The gateway verifies it again (signature, issuer, audience, expiry) before trusting any claim in it.
++ */
++export function createOperatorVerifier(
++  settings: OperatorTokenSettings,
++  keys: JWTVerifyGetKey,
++): OperatorVerifier {
++  return {
++    async verify(token) {
++      try {
++        const { payload } = await jwtVerify(token, keys, {
++          issuer: settings.issuer,
++          audience: settings.audience,
++          algorithms: ['RS256', 'ES256'],
++          requiredClaims: ['sub', 'exp'],
++          clockTolerance: 30,
++        });
++        return toOperator(payload);
++      } catch (error) {
++        if (error instanceof errors.JOSEError) {
++          return undefined;
++        }
++        throw error;
++      }
++    },
++  };
++}
++
++export function remoteKeys(jwksUrl: string): JWTVerifyGetKey {
++  return createRemoteJWKSet(new URL(jwksUrl), { cooldownDuration: 30_000, cacheMaxAge: 600_000 });
++}
++
++/** Requires a valid operator token and keeps the operator on the request. */
++export function authenticate(verifier: OperatorVerifier): preHandlerAsyncHookHandler {
++  return async (request: FastifyRequest, reply: FastifyReply) => {
++    const token = bearerToken(request.headers.authorization);
++    const operator = token === undefined ? undefined : await verifier.verify(token);
++    if (!operator) {
++      void reply.header('WWW-Authenticate', 'Bearer');
++      return sendProblem(reply, 401, 'Sign in to use the operations console.');
++    }
++    request.operator = operator;
++  };
++}
++
++/** Requires the authenticated operator to hold a scope. Register after `authenticate`. */
++export function requireScope(scope: string): preHandlerAsyncHookHandler {
++  return async (request: FastifyRequest, reply: FastifyReply) => {
++    if (!request.operator?.scopes.has(scope)) {
++      return sendProblem(reply, 403, `This needs the ${scope} permission.`);
++    }
++  };
++}
++
++function bearerToken(header: string | undefined): string | undefined {
++  const [scheme, token, ...rest] = header?.split(' ') ?? [];
++  return scheme?.toLowerCase() === 'bearer' && token && rest.length === 0 ? token : undefined;
++}
++
++function toOperator(payload: JWTPayload): Operator {
++  const scope = typeof payload.scope === 'string' ? payload.scope : '';
++  return {
++    id: payload.sub ?? '',
++    scopes: new Set(scope.split(' ').filter((value) => value.length > 0)),
++  };
++}
+diff --git a/tests/support/operator-tokens.ts b/tests/support/operator-tokens.ts
+new file mode 100644
+index 0000000..ba1923c
+--- /dev/null
++++ b/tests/support/operator-tokens.ts
+@@ -0,0 +1,31 @@
++import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey } from 'jose';
++
++export const issuer = 'https://id.test/realms/operations';
++export const audience = 'quellbrook-console';
++
++/** An in-process identity provider: an ES256 key pair generated for the test run, never written anywhere. */
++export interface OperatorTokens {
++  readonly keys: JWTVerifyGetKey;
++  sign(
++    subject: string,
++    scopes: readonly string[],
++    options?: { audience?: string; expiresIn?: string },
++  ): Promise<string>;
++}
++
++export async function createOperatorTokens(): Promise<OperatorTokens> {
++  const { publicKey, privateKey } = await generateKeyPair('ES256');
++  const jwk = { ...(await exportJWK(publicKey)), kid: 'test', alg: 'ES256' };
++  return {
++    keys: createLocalJWKSet({ keys: [jwk] }),
++    sign: (subject, scopes, options) =>
++      new SignJWT({ scope: scopes.join(' ') })
++        .setProtectedHeader({ alg: 'ES256', kid: 'test' })
++        .setSubject(subject)
++        .setIssuer(issuer)
++        .setAudience(options?.audience ?? audience)
++        .setIssuedAt()
++        .setExpirationTime(options?.expiresIn ?? '10m')
++        .sign(privateKey),
++  };
++}
+diff --git a/tests/unit/operator-auth.test.ts b/tests/unit/operator-auth.test.ts
+new file mode 100644
+index 0000000..8053288
+--- /dev/null
++++ b/tests/unit/operator-auth.test.ts
+@@ -0,0 +1,31 @@
++import { describe, expect, it } from 'vitest';
++import { createOperatorVerifier } from '../../src/auth/operator-auth.js';
++import { audience, createOperatorTokens, issuer } from '../support/operator-tokens.js';
++
++describe('operator tokens', () => {
++  it('accepts a token of the identity provider for the console and reads subject and scopes', async () => {
++    const tokens = await createOperatorTokens();
++    const verifier = createOperatorVerifier({ issuer, audience }, tokens.keys);
++
++    const operator = await verifier.verify(
++      await tokens.sign('operator-4', ['orders:read', 'dispatch:read']),
++    );
++
++    expect(operator?.id).toBe('operator-4');
++    expect([...(operator?.scopes ?? [])]).toEqual(['orders:read', 'dispatch:read']);
++  });
++
++  it('refuses a token for another audience, an expired one and one signed by someone else', async () => {
++    const tokens = await createOperatorTokens();
++    const other = await createOperatorTokens();
++    const verifier = createOperatorVerifier({ issuer, audience }, tokens.keys);
++
++    expect(
++      await verifier.verify(await tokens.sign('operator-4', [], { audience: 'another-app' })),
++    ).toBeUndefined();
++    expect(
++      await verifier.verify(await tokens.sign('operator-4', [], { expiresIn: '-5m' })),
++    ).toBeUndefined();
++    expect(await verifier.verify(await other.sign('operator-4', []))).toBeUndefined();
++  });
++});

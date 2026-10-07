@@ -1,0 +1,260 @@
+From fb4f4fdf0857c2a9468488352627521b3c2de689 Mon Sep 17 00:00:00 2001
+From: Mara Ellingsworth <mara.ellingsworth@example.invalid>
+Date: Thu, 13 Aug 2026 16:31:47 +0200
+Subject: feat: dispatch board routes (board, assignment, starting a route)
+
+---
+ src/app.ts                                |  4 ++
+ src/main.ts                               |  2 +
+ src/routes/dispatch-routes.ts             | 72 +++++++++++++++++++++++
+ tests/integration/dispatch-routes.test.ts | 69 ++++++++++++++++++++++
+ tests/support/test-app.ts                 |  5 ++
+ 5 files changed, 152 insertions(+)
+ create mode 100644 src/routes/dispatch-routes.ts
+ create mode 100644 tests/integration/dispatch-routes.test.ts
+
+diff --git a/src/app.ts b/src/app.ts
+index 18322da..0435e0d 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -3,8 +3,10 @@ import helmet from '@fastify/helmet';
+ import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
+ import type { OperatorVerifier } from './auth/operator-auth.js';
+ import { sendProblem } from './http/problem.js';
++import { dispatchRoutes } from './routes/dispatch-routes.js';
+ import { healthRoutes } from './routes/health-routes.js';
+ import { ordersRoutes } from './routes/orders-routes.js';
++import type { DispatchApi } from './upstream/dispatch-api.js';
+ import type { OrdersApi } from './upstream/orders-api.js';
+ import { UpstreamError } from './upstream/upstream-client.js';
+ 
+@@ -12,6 +14,7 @@ export interface AppDependencies {
+   readonly logger: FastifyBaseLogger;
+   readonly verifier: OperatorVerifier;
+   readonly orders: OrdersApi;
++  readonly dispatch: DispatchApi;
+   readonly corsOrigins: readonly string[];
+ }
+ 
+@@ -46,5 +49,6 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
+ 
+   healthRoutes(app);
+   ordersRoutes(app, dependencies);
++  dispatchRoutes(app, dependencies);
+   return app;
+ }
+diff --git a/src/main.ts b/src/main.ts
+index 4fa9ba5..65f9c7b 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -3,6 +3,7 @@ import { buildApp } from './app.js';
+ import { createOperatorVerifier, remoteKeys } from './auth/operator-auth.js';
+ import { loadConfig } from './config.js';
+ import { loggerOptions } from './logger.js';
++import { createDispatchApi } from './upstream/dispatch-api.js';
+ import { createOrdersApi } from './upstream/orders-api.js';
+ import { createServiceTokenSource } from './upstream/service-token.js';
+ import { createUpstreamClient } from './upstream/upstream-client.js';
+@@ -27,6 +28,7 @@ const app = await buildApp({
+     remoteKeys(config.operatorTokens.jwksUrl),
+   ),
+   orders: createOrdersApi(upstream('orders', config.upstreams.orders)),
++  dispatch: createDispatchApi(upstream('dispatch', config.upstreams.dispatch)),
+   corsOrigins: config.corsOrigins,
+ });
+ 
+diff --git a/src/routes/dispatch-routes.ts b/src/routes/dispatch-routes.ts
+new file mode 100644
+index 0000000..494df58
+--- /dev/null
++++ b/src/routes/dispatch-routes.ts
+@@ -0,0 +1,72 @@
++import type { FastifyInstance } from 'fastify';
++import { authenticate, requireScope, type OperatorVerifier } from '../auth/operator-auth.js';
++import type { DispatchApi } from '../upstream/dispatch-api.js';
++import { operatorOf, relay } from './orders-routes.js';
++
++export interface DispatchRouteDependencies {
++  readonly verifier: OperatorVerifier;
++  readonly dispatch: DispatchApi;
++}
++
++const uuid = { type: 'string', format: 'uuid' } as const;
++const date = { type: 'string', format: 'date' } as const;
++
++/** The dispatch board: routes of a day, assigning consignments, starting routes, the route planner's drivers. */
++export function dispatchRoutes(
++  app: FastifyInstance,
++  dependencies: DispatchRouteDependencies,
++): void {
++  const signedIn = authenticate(dependencies.verifier);
++
++  app.get<{ Querystring: { date: string } }>(
++    '/api/dispatch/board',
++    {
++      preHandler: [signedIn, requireScope('dispatch:read')],
++      schema: { querystring: { type: 'object', required: ['date'], properties: { date } } },
++    },
++    async (request, reply) =>
++      relay(reply, await dependencies.dispatch.board(operatorOf(request), request.query.date)),
++  );
++
++  app.post<{ Params: { consignmentId: string }; Body: { serviceDate: string } }>(
++    '/api/dispatch/consignments/:consignmentId/assignment',
++    {
++      preHandler: [signedIn, requireScope('dispatch:write')],
++      schema: {
++        params: {
++          type: 'object',
++          required: ['consignmentId'],
++          properties: { consignmentId: uuid },
++        },
++        body: {
++          type: 'object',
++          required: ['serviceDate'],
++          additionalProperties: false,
++          properties: { serviceDate: date },
++        },
++      },
++    },
++    async (request, reply) =>
++      relay(
++        reply,
++        await dependencies.dispatch.assign(
++          operatorOf(request),
++          request.params.consignmentId,
++          request.body.serviceDate,
++        ),
++      ),
++  );
++
++  app.post<{ Params: { routeId: string } }>(
++    '/api/dispatch/routes/:routeId/start',
++    {
++      preHandler: [signedIn, requireScope('dispatch:write')],
++      schema: { params: { type: 'object', required: ['routeId'], properties: { routeId: uuid } } },
++    },
++    async (request, reply) =>
++      relay(
++        reply,
++        await dependencies.dispatch.startRoute(operatorOf(request), request.params.routeId),
++      ),
++  );
++}
+diff --git a/tests/integration/dispatch-routes.test.ts b/tests/integration/dispatch-routes.test.ts
+new file mode 100644
+index 0000000..42bf80f
+--- /dev/null
++++ b/tests/integration/dispatch-routes.test.ts
+@@ -0,0 +1,69 @@
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { json } from '../support/fake-upstream.js';
++import { createTestApp, type TestApp } from '../support/test-app.js';
++
++const routeId = '0198f1a2-0000-7000-8000-0000000000a1';
++const consignmentId = '0198f1a2-0000-7000-8000-0000000000c1';
++
++describe('dispatch routes', () => {
++  let test: TestApp;
++  beforeAll(async () => {
++    test = await createTestApp();
++  });
++  afterAll(async () => {
++    await test.app.close();
++  });
++
++  it('shows the board of a day', async () => {
++    test.dispatch.answer(json(200, [{ routeId, zone: 'DK-AAR', stops: [] }]));
++
++    const response = await test.app.inject({
++      method: 'GET',
++      url: '/api/dispatch/board?date=2026-08-12',
++      headers: await test.bearer(['dispatch:read']),
++    });
++
++    expect(response.statusCode).toBe(200);
++    expect(test.dispatch.calls.at(-1)?.url).toBe('http://dispatch.test/routes?date=2026-08-12');
++  });
++
++  it('assigns a consignment and starts a route', async () => {
++    test.dispatch.answer(json(200, { routeId }), new Response(null, { status: 204 }));
++    const headers = await test.bearer(['dispatch:write'], 'dispatcher-2');
++
++    const assigned = await test.app.inject({
++      method: 'POST',
++      url: `/api/dispatch/consignments/${consignmentId}/assignment`,
++      payload: { serviceDate: '2026-08-12' },
++      headers,
++    });
++    const started = await test.app.inject({
++      method: 'POST',
++      url: `/api/dispatch/routes/${routeId}/start`,
++      headers,
++    });
++
++    expect(assigned.statusCode).toBe(200);
++    expect(started.statusCode).toBe(204);
++    expect(test.dispatch.calls.at(-2)?.body).toEqual({ serviceDate: '2026-08-12' });
++    expect(test.dispatch.calls.at(-1)?.headers['x-quellbrook-operator']).toBe('dispatcher-2');
++  });
++
++  it('refuses writes without the write scope and malformed dates', async () => {
++    const reader = await test.bearer(['dispatch:read']);
++
++    const start = await test.app.inject({
++      method: 'POST',
++      url: `/api/dispatch/routes/${routeId}/start`,
++      headers: reader,
++    });
++    const board = await test.app.inject({
++      method: 'GET',
++      url: '/api/dispatch/board?date=tomorrow',
++      headers: reader,
++    });
++
++    expect(start.statusCode).toBe(403);
++    expect(board.statusCode).toBe(400);
++  });
++});
+diff --git a/tests/support/test-app.ts b/tests/support/test-app.ts
+index d9c6036..ba5db56 100644
+--- a/tests/support/test-app.ts
++++ b/tests/support/test-app.ts
+@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
+ import { pino } from 'pino';
+ import { buildApp } from '../../src/app.js';
+ import { createOperatorVerifier } from '../../src/auth/operator-auth.js';
++import { createDispatchApi } from '../../src/upstream/dispatch-api.js';
+ import { createOrdersApi } from '../../src/upstream/orders-api.js';
+ import { createUpstreamClient } from '../../src/upstream/upstream-client.js';
+ import { FakeUpstream, fixedToken } from './fake-upstream.js';
+@@ -11,12 +12,14 @@ export interface TestApp {
+   readonly app: FastifyInstance;
+   readonly tokens: OperatorTokens;
+   readonly orders: FakeUpstream;
++  readonly dispatch: FakeUpstream;
+   bearer(scopes: readonly string[], subject?: string): Promise<{ authorization: string }>;
+ }
+ 
+ export async function createTestApp(): Promise<TestApp> {
+   const tokens = await createOperatorTokens();
+   const orders = new FakeUpstream();
++  const dispatch = new FakeUpstream();
+   const logger = pino({ level: 'silent' });
+   const client = (name: string, baseUrl: string, upstream: FakeUpstream) =>
+     createUpstreamClient({
+@@ -31,12 +34,14 @@ export async function createTestApp(): Promise<TestApp> {
+     logger,
+     verifier: createOperatorVerifier({ issuer, audience }, tokens.keys),
+     orders: createOrdersApi(client('orders', 'http://orders.test', orders)),
++    dispatch: createDispatchApi(client('dispatch', 'http://dispatch.test', dispatch)),
+     corsOrigins: ['https://ops.test'],
+   });
+   return {
+     app,
+     tokens,
+     orders,
++    dispatch,
+     bearer: async (scopes, subject = 'operator-17') => ({
+       authorization: `Bearer ${await tokens.sign(subject, scopes)}`,
+     }),
