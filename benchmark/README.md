@@ -62,6 +62,7 @@ The commits are listed in `benchmark/history/README.md`.
 | TRP-003 | `hardcoded-credential` | `.env.example:1-15` | .env.example documents every variable with a non-secret local default or an empty value; the client secret line is empty. |
 | TRP-004 | `hardcoded-credential` | `deploy/k8s/deployment.yaml:63-67` | The gateway's client secret is read from a Kubernetes Secret (secretKeyRef) materialised by an ExternalSecret. |
 | TRP-006 | `missing-image-healthcheck` | `Dockerfile` | The image runs only on Kubernetes, which ignores a Dockerfile HEALTHCHECK; the probes are in deploy/k8s/deployment.yaml (the Dockerfile says so in its header). |
+| TRP-007 | `adr-quality` | `docs/adr/0001-record-architecture-decisions.md` | ADR 0001 records the decision to record decisions (Nygard's first ADR); a process decision is a legitimate and conventional first record with status, context, decision and two-sided consequences. Promoted from a model-judged result (the same site is a trap in the dispatch and notifier repositories). |
 | TRP-005 | `server-side-request-forgery` | `src/upstream/orders-api.ts:29` | The upstream URL is built from a configured base URL and a path whose only caller-supplied part is a route parameter that the route schema restricts to a UUID and that is percent-encoded; the caller cannot choose the host, scheme or port. |
 
 ## Certified clean

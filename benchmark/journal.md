@@ -48,3 +48,18 @@
   `v0.1.0` 25, `v0.2.0` 34, `v0.3.0` 40 tests, all green.
 - `benchmark/history/`: patches and `build-history.sh` (verified into a fresh directory: HEAD and three tags match).
 - Key changes: trap TRP-006.
+
+## 2026-10-07 — scan iteration 2 (final) and freeze
+
+- Pushed: main fast-forwarded from the key-first commit to `32afa8a` (no force push), plus tags `v0.1.0` … `v0.3.0`.
+  (Correction to the implementation entry: the scripted history has 24 commits, not 25.)
+- Contained pass at `32afa8a`: 6 results. The D36 signing row of iteration 1 is gone after the fix. Recall 0/2
+  (GW-001, GW-002, judged in iteration 1); TRP-006 (DS-0026) caught; the rest is the recorded noise of iteration 1.
+- Model-judged host pass at `32afa8a`: D19 90, D20 60, D21 100, M4 77. New rows, judged:
+  - D20 "ADR 0001 describes a process for creating ADRs" — **opinion-not-fact** (the conventional first ADR) →
+    trap TRP-007, added with this entry (key only; the code is unchanged since the scans).
+  - M4 × 29 "README claims the project uses `@fastify/swagger` / `@fastify/session` / … / `--env-file`" —
+    **false-positive**: the README names none of these packages (the model listed Fastify plugins the gateway does not
+    use and attributed them to the README); `--env-file` is a Node.js command-line option, which no manifest or file
+    name can show.
+- Converged: two plants (both missed), seven traps, recorded noise only. Frozen as v1.0.0 with this entry.
