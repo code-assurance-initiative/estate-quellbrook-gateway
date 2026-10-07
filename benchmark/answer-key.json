@@ -1,0 +1,525 @@
+{
+  "schema": "https://github.com/code-assurance-initiative/scanner-benchmark/schema/answer-key.schema.json",
+  "schemaVersion": "1.2",
+  "repo": "code-assurance-initiative/estate-quellbrook-gateway",
+  "keyVersion": "1.0.0",
+  "languages": [
+    "typescript"
+  ],
+  "theme": "Quellbrook Freight reference estate, API gateway / BFF: a TypeScript Fastify service that authenticates operators, routes to the order and dispatch services with its own service identity and aggregates a shipment view; owned by the Edge team (steady progress over three sprints).",
+  "lineTolerance": 3,
+  "entries": [
+    {
+      "id": "GW-001",
+      "label": "must-fire",
+      "concept": "missing-authorization",
+      "cwe": "CWE-862",
+      "file": "src/routes/dispatch-routes.ts",
+      "lines": [
+        60,
+        70
+      ],
+      "rationale": "GET /api/dispatch/drivers/available was added in sprint 2 for the dispatch board without the operator authentication and scope pre-handlers every other /api route has. The gateway calls the dispatch service with its own service credentials, so the route returns the driver roster (names, licence categories, shift times, vehicles) to any caller that can reach the ingress, with or without a session."
+    },
+    {
+      "id": "GW-002",
+      "label": "must-fire",
+      "concept": "sensitive-data-in-logs",
+      "cwe": "CWE-532",
+      "file": "src/upstream/upstream-client.ts",
+      "lines": [
+        80,
+        90
+      ],
+      "rationale": "When an upstream call fails the client logs the outgoing request including its headers. Those headers carry the gateway's own bearer token for the downstream services (Authorization) and the operator id; the logger's redaction list covers only the incoming request's authorization and cookie headers, not this field, so a service token valid for every downstream API reaches the log platform on every upstream error."
+    },
+    {
+      "id": "TRP-001",
+      "label": "must-not-fire",
+      "concept": "missing-authorization",
+      "cwe": "CWE-862",
+      "file": "src/routes/health-routes.ts",
+      "lines": [
+        5,
+        25
+      ],
+      "rationale": "/healthz and /readyz are the kubelet's liveness and readiness probes; they return a status word and no data, and are anonymous by design."
+    },
+    {
+      "id": "TRP-002",
+      "label": "must-not-fire",
+      "concept": "sensitive-data-in-logs",
+      "cwe": "CWE-532",
+      "file": "src/logger.ts",
+      "lines": [
+        10,
+        16
+      ],
+      "rationale": "The logger configuration names the authorization and cookie headers only to redact them; it is the control, not a leak."
+    },
+    {
+      "id": "TRP-003",
+      "label": "must-not-fire",
+      "concept": "hardcoded-credential",
+      "cwe": "CWE-798",
+      "file": ".env.example",
+      "lines": [
+        1,
+        20
+      ],
+      "rationale": ".env.example documents every variable with a non-secret local default or an empty value; the client secret line is empty."
+    },
+    {
+      "id": "TRP-004",
+      "label": "must-not-fire",
+      "concept": "hardcoded-credential",
+      "cwe": "CWE-798",
+      "file": "deploy/k8s/deployment.yaml",
+      "lines": [
+        50,
+        60
+      ],
+      "rationale": "The gateway's client secret is read from a Kubernetes Secret (secretKeyRef) materialised by an ExternalSecret."
+    },
+    {
+      "id": "TRP-005",
+      "label": "must-not-fire",
+      "concept": "server-side-request-forgery",
+      "cwe": "CWE-918",
+      "file": "src/upstream/orders-api.ts",
+      "lines": [
+        20,
+        30
+      ],
+      "rationale": "The upstream URL is built from a configured base URL and a path whose only caller-supplied part is a route parameter that the route schema restricts to a UUID and that is percent-encoded; the caller cannot choose the host, scheme or port."
+    },
+    {
+      "id": "NA-001",
+      "label": "not-applicable",
+      "concept": "missing-text-alternative",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no images."
+    },
+    {
+      "id": "NA-002",
+      "label": "not-applicable",
+      "concept": "form-control-without-label",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no form controls."
+    },
+    {
+      "id": "NA-003",
+      "label": "not-applicable",
+      "concept": "page-structure-violation",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no pages."
+    },
+    {
+      "id": "NA-004",
+      "label": "not-applicable",
+      "concept": "non-keyboard-accessible-interaction",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no interactive markup."
+    },
+    {
+      "id": "NA-005",
+      "label": "not-applicable",
+      "concept": "invalid-aria-usage",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no ARIA attributes."
+    },
+    {
+      "id": "NA-006",
+      "label": "not-applicable",
+      "concept": "visual-and-motion-safety",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no styles or animation."
+    },
+    {
+      "id": "NA-007",
+      "label": "not-applicable",
+      "concept": "accessibility-checks-in-ci",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no user interface to check."
+    },
+    {
+      "id": "NA-008",
+      "label": "not-applicable",
+      "concept": "alt-text-quality",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no images."
+    },
+    {
+      "id": "NA-009",
+      "label": "not-applicable",
+      "concept": "link-and-button-text-quality",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no links or buttons."
+    },
+    {
+      "id": "NA-010",
+      "label": "not-applicable",
+      "concept": "heading-and-label-text-quality",
+      "rationale": "The gateway is a JSON API; it has no user interface: there are no headings or labels."
+    },
+    {
+      "id": "NA-011",
+      "label": "not-applicable",
+      "concept": "sensitive-data-in-browser-storage",
+      "rationale": "No browser code."
+    },
+    {
+      "id": "NA-012",
+      "label": "not-applicable",
+      "concept": "versioned-schema-migrations",
+      "rationale": "The gateway has no database."
+    },
+    {
+      "id": "NA-013",
+      "label": "not-applicable",
+      "concept": "dual-write-without-outbox",
+      "rationale": "The gateway owns no data and publishes no messages."
+    },
+    {
+      "id": "BND-001",
+      "label": "score-band",
+      "concept": "high-cyclomatic-complexity",
+      "band": [
+        80,
+        100
+      ],
+      "rationale": "Small handlers and aggregates; no method above the usual threshold."
+    },
+    {
+      "id": "BND-002",
+      "label": "score-band",
+      "concept": "high-cognitive-complexity",
+      "band": [
+        80,
+        100
+      ],
+      "rationale": "Small handlers and aggregates; flat control flow."
+    },
+    {
+      "id": "BND-003",
+      "label": "score-band",
+      "concept": "duplicated-code",
+      "band": [
+        80,
+        100
+      ],
+      "rationale": "No copied blocks of note."
+    },
+    {
+      "id": "BND-004",
+      "label": "score-band",
+      "concept": "test-coverage",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "Unit tests for the domain and application layers, integration tests over the HTTP API and persistence."
+    },
+    {
+      "id": "BND-005",
+      "label": "score-band",
+      "concept": "test-pyramid-distribution",
+      "band": [
+        40,
+        100
+      ],
+      "rationale": "Unit tests for the clients and helpers, injection tests over every route."
+    },
+    {
+      "id": "BND-006",
+      "label": "score-band",
+      "concept": "dependencies-not-locked",
+      "band": [
+        80,
+        100
+      ],
+      "rationale": "package-lock.json committed; CI installs with npm ci."
+    },
+    {
+      "id": "BND-007",
+      "label": "score-band",
+      "concept": "security-tooling-in-ci",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "CodeQL on every pull request, npm audit and signature verification in CI."
+    },
+    {
+      "id": "BND-008",
+      "label": "score-band",
+      "concept": "vulnerability-disclosure-policy",
+      "band": [
+        80,
+        100
+      ],
+      "rationale": "SECURITY.md with a private reporting channel and response times."
+    },
+    {
+      "id": "BND-009",
+      "label": "score-band",
+      "concept": "readme-quality",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "README with purpose, build/run, configuration, testing, architecture and ownership sections."
+    },
+    {
+      "id": "BND-010",
+      "label": "score-band",
+      "concept": "architecture-documentation",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "docs/architecture.md with C4 diagrams in Mermaid, plus ADRs."
+    },
+    {
+      "id": "BND-011",
+      "label": "score-band",
+      "concept": "folder-structure",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "src/ and tests/ separation by layer (routes, upstream, auth)."
+    },
+    {
+      "id": "BND-012",
+      "label": "score-band",
+      "concept": "ci-build-and-test-pipeline",
+      "band": [
+        80,
+        100
+      ],
+      "rationale": "CI builds and tests every push and pull request."
+    },
+    {
+      "id": "BND-013",
+      "label": "score-band",
+      "concept": "observability",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "pino structured logs with request ids, health and readiness probes, traceparent propagation."
+    },
+    {
+      "id": "BND-014",
+      "label": "score-band",
+      "concept": "deployment-rollback-safety",
+      "band": [
+        50,
+        100
+      ],
+      "rationale": "Rolling updates by image digest with a rollback step in the deploy workflow."
+    },
+    {
+      "id": "BND-015",
+      "label": "score-band",
+      "concept": "release-hygiene",
+      "band": [
+        40,
+        100
+      ],
+      "rationale": "CHANGELOG with every release, package.json version 0.3.0 and tags v0.1.0..v0.3.0."
+    },
+    {
+      "id": "BND-016",
+      "label": "score-band",
+      "concept": "build-provenance-and-signing",
+      "band": [
+        40,
+        100
+      ],
+      "rationale": "Release images built by CI with provenance and SBOM attestations."
+    },
+    {
+      "id": "BND-017",
+      "label": "score-band",
+      "concept": "network-egress-policy",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Default-deny NetworkPolicies with one allowance per real flow."
+    },
+    {
+      "id": "BND-018",
+      "label": "score-band",
+      "concept": "workload-syscall-confinement",
+      "band": [
+        10,
+        80
+      ],
+      "rationale": "seccomp RuntimeDefault, all capabilities dropped; no AppArmor or custom profiles."
+    },
+    {
+      "id": "BND-019",
+      "label": "score-band",
+      "concept": "runtime-threat-detection-and-admission",
+      "band": [
+        0,
+        40
+      ],
+      "rationale": "Pod Security Admission 'restricted' on the namespace; no runtime threat detection or signed-image admission."
+    },
+    {
+      "id": "BND-020",
+      "label": "score-band",
+      "concept": "churn-complexity-hotspot",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "Six weeks of history; churn lands on small files."
+    },
+    {
+      "id": "BND-021",
+      "label": "score-band",
+      "concept": "knowledge-concentration",
+      "band": [
+        30,
+        100
+      ],
+      "rationale": "A team of two or three authors over six weeks; some files are naturally single-author."
+    },
+    {
+      "id": "BND-022",
+      "label": "score-band",
+      "concept": "knowledge-freshness",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "The whole history is recent and the authors are active."
+    },
+    {
+      "id": "BND-023",
+      "label": "score-band",
+      "concept": "change-coupling",
+      "band": [
+        50,
+        100
+      ],
+      "rationale": "Co-changes are explicit dependencies or tests changing with their subject."
+    },
+    {
+      "id": "BND-024",
+      "label": "score-band",
+      "concept": "documentation-quality",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Model-judged. README, architecture overview and ADRs are clear and current. Wide band."
+    },
+    {
+      "id": "BND-025",
+      "label": "score-band",
+      "concept": "adr-quality",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Model-judged. ADRs carry status, context, decision and two-sided consequences. Wide band."
+    },
+    {
+      "id": "BND-026",
+      "label": "score-band",
+      "concept": "adr-conformance",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Model-judged. The code follows its ADRs. Wide band."
+    },
+    {
+      "id": "BND-027",
+      "label": "score-band",
+      "concept": "documentation-accuracy",
+      "band": [
+        50,
+        100
+      ],
+      "rationale": "Model-judged. README and architecture describe the code as it is. Wide band."
+    },
+    {
+      "id": "BND-028",
+      "label": "score-band",
+      "concept": "inconsistent-naming",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Model-judged. Consistent domain vocabulary. Wide band."
+    },
+    {
+      "id": "BND-029",
+      "label": "score-band",
+      "concept": "low-value-comments",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Model-judged. Comments explain why, not what. Wide band."
+    },
+    {
+      "id": "BND-030",
+      "label": "score-band",
+      "concept": "internal-api-inconsistency",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "Model-judged. Endpoints and handlers follow one shape. Wide band."
+    },
+    {
+      "id": "BND-031",
+      "label": "score-band",
+      "concept": "authorization-enforcement",
+      "band": [
+        40,
+        95
+      ],
+      "rationale": "Every /api route but one (GW-001) requires an operator token and a scope."
+    },
+    {
+      "id": "BND-032",
+      "label": "score-band",
+      "concept": "outbound-http-resilience",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "Every upstream call has a timeout; idempotent reads retry with backoff."
+    },
+    {
+      "id": "BND-033",
+      "label": "score-band",
+      "concept": "untyped-javascript-share",
+      "band": [
+        90,
+        100
+      ],
+      "rationale": "TypeScript throughout, strict mode."
+    },
+    {
+      "id": "BND-034",
+      "label": "score-band",
+      "concept": "security-response-headers",
+      "band": [
+        70,
+        100
+      ],
+      "rationale": "helmet defaults plus a strict CSP for JSON responses."
+    },
+    {
+      "id": "BND-035",
+      "label": "score-band",
+      "concept": "inbound-input-validation",
+      "band": [
+        60,
+        100
+      ],
+      "rationale": "JSON schema on every route's params, query and body."
+    }
+  ]
+}
